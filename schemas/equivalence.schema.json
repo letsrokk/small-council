@@ -1,0 +1,38 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["groups"],
+  "properties": {
+    "groups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["canonical_option", "proposers", "member_recommendations", "reason"],
+        "properties": {
+          "canonical_option": {
+            "type": "string"
+          },
+          "proposers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "member_recommendations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "reason": {
+            "type": "string"
+          }
+        }
+      },
+      "minItems": 1
+    }
+  }
+}

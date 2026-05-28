@@ -1,0 +1,84 @@
+council:
+  min_members: 1
+  runoff_rounds: 3
+  update_interval_seconds: 5
+  diversity_mode: balanced
+  member_names:
+    - Aurelia
+    - Bram
+    - Cato
+    - Dima
+    - Echo
+  generated_member_names:
+    - Fenn
+    - Gaia
+    - Hale
+    - Iona
+    - Juno
+    - Knox
+    - Lyra
+    - Marius
+    - Nyx
+    - Orin
+    - Petra
+    - Quill
+    - Rhea
+    - Soren
+    - Thalia
+    - Uriel
+    - Vesper
+    - Wren
+    - Xanthe
+    - Yara
+    - Zeno
+
+model_pool:
+  - gpt-5.5
+  - gpt-5.4
+  - gpt-5.3-codex
+  - gpt-5.4-mini
+
+model_assignment:
+  mode: random_on_creation
+  persist_assignment: true
+  prefer_unique_models: true
+  allow_duplicates_when_needed: true
+
+model_overrides:
+
+personality_assignment:
+  mode: random_on_creation
+  persist_assignment: true
+  prefer_unique_personalities: true
+
+personality_pool:
+  - friendly and enthusiastic
+  - dry and skeptical
+  - concise and analytical
+  - playful and chaotic
+  - practical and budget-conscious
+  - refined and taste-focused
+  - contrarian
+  - cautious and risk-averse
+  - blunt and direct
+  - curious and exploratory
+  - cinematic and dramatic
+  - trend-chasing
+  - old-school traditionalist
+  - optimization obsessed
+  - emotionally intuitive
+
+codex:
+  reasoning_effort: medium
+  temperature: null
+  project_local_home: ./.codex
+
+storage:
+  council_state_path: ./storage/council-state.json
+  leaderboard_path: ./storage/leaderboard.json
+  memories_path: ./storage/memories
+
+runtime:
+  sessions_path: ./runtime/sessions
+  logs_path: ./runtime/logs
+  temp_path: ./runtime/temp

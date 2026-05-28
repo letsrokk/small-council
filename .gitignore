@@ -1,0 +1,41 @@
+__pycache__/
+*.pyc
+
+# Project-local Codex auth, logs, caches, and session state.
+.codex/
+.codex/**
+
+# Local environment and secret files.
+.env
+.env.*
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+
+# Local databases and transient state.
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+
+# Runtime artifacts.
+runtime/logs/*
+runtime/temp/*
+runtime/xdg-cache/
+runtime/xdg-config/
+runtime/xdg-data/
+
+!runtime/logs/.gitkeep
+!runtime/temp/.gitkeep
+
+# Generated persistent agent identities.
+agents/definitions/*
+!agents/definitions/.gitkeep
+
+# Local persisted council state and personal decision history.
+storage/*.json
+storage/memories/*
+!storage/.gitkeep
+!storage/memories/.gitkeep

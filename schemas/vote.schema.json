@@ -1,0 +1,25 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["voter", "critique", "selected_option", "selected_proposer", "reason", "self_vote"],
+  "properties": {
+    "voter": {
+      "type": "string"
+    },
+    "critique": {
+      "type": "string"
+    },
+    "selected_option": {
+      "type": "string"
+    },
+    "selected_proposer": {
+      "type": "string"
+    },
+    "reason": {
+      "type": "string"
+    },
+    "self_vote": {
+      "type": "boolean"
+    }
+  }
+}
