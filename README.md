@@ -2,6 +2,39 @@
 
 A CLI-first personal decision council powered by project-local OpenAI Codex subagents.
 
+## What It Looks Like
+
+```bash
+> ./council "which Oscars 2026 best picture nominee should I watch tonight?"
+[20:32:03] Secretary
+Request received: which Oscars 2026 best picture nominee should I watch tonight?
+
+[20:32:03] Secretary
+Diversity lanes assigned for balanced mode.
+
+[20:33:00] Secretary
+Initial proposals are in: five independent nominees have been put forward across the council’s diversity lanes. The current set spans mainstream, underrated, budget-friendly, special-occasion, and contrarian angles, and no vote has been taken yet. We’re still in the research phase, so the next step is comparison rather than a final pick.
+
+[20:33:41] Secretary
+Discussion round 1 is complete. The council has compared the four nominee paths against the practical constraints and updated several members’ positions: Cato and Bram stayed on the low-friction option, while Aurelia and Dima moved toward the headline winner, and Echo moved off the contrarian lane. No vote has been taken yet, so the recommendation remains pending final council selection.
+
+[20:34:06] Secretary
+Discussion round 2 is complete. The council has now surfaced the main split clearly: practical couch-friendly picks versus the headline prestige answer, with members mostly re-affirming their positions and no final recommendation issued yet. The thread is ready for the next phase of voting or consolidation.
+
+[20:34:12] Secretary
+The council has completed the final proposals milestone and finished its discussion rounds. The visible consensus shifted toward a practical, low-friction nominee, while one member kept the prestige-first counterpoint on the table. No vote was taken yet; the next step is final voting/selection.
+
+[20:34:27] Secretary
+Proposal grouping is complete. The council has reduced the initial spread of nominee picks into two clear camps: a majority-leaning practical default around "Train Dreams" and a prestige fallback around "One Battle After Another." No vote has been taken yet; the next step is to convert this into a final choice.
+
+[20:35:08] Secretary
+Initial vote is complete, and the council has now finished two discussion rounds. The main split is clear: one camp favors the low-friction, shorter Netflix option for a tonight decision, while the other favors the headline prestige pick for Oscars signal. No final answer has been issued yet; the next step is a final council conclusion.
+
+Watch "Train Dreams" tonight.
+
+The council settled it 4 to 1, and the winning recommendation was shared by Aurelia, Bram, Cato, and Dima. Old-school ruling: when the table reaches that kind of consensus, you don’t dither, you pour a drink, dim the lights, and put on the respectable winner.
+```
+
 ## Run
 
 ```bash
@@ -37,13 +70,19 @@ Decision output is human-readable by default. Use JSON when you want a structure
 ./council --json-output "What movie should I watch tonight?"
 ```
 
-The local Secretary prints progress updates to stderr while the council works. The first update appears immediately, and follow-up updates appear every 5 seconds by default:
+The Secretary prints short immediate progress updates for completed events on stderr, then milestone summaries after the larger council phases: initial proposals, each discussion round, final proposals, proposal grouping, the initial vote, and any runoff votes.
+
+The Secretary is non-voting and does not count as a council member. A model-backed Secretary is the default. The local Secretary remains available for deterministic/offline runs:
 
 ```bash
-./council --set-update-interval 10 "Where should I go for dinner?"
+./council --secretary local "Where should I go for dinner?"
+./council --secretary model --secretary-verbosity balanced "Where should I go for dinner?"
+./council --no-secretary-immediate-updates "Where should I go for dinner?"
 ```
 
-The Secretary is a non-voting local reporter and does not count as a council member.
+Supported model-backed verbosity levels are `low`, `balanced`, and `high`.
+
+After the initial draft proposals, the council enters a threaded discussion phase, revises those drafts, then groups equivalent final proposals before voting.
 
 ## Proposal Diversity
 

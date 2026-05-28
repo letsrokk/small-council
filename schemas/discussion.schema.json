@@ -1,0 +1,47 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["member", "discussion_reply", "revised_recommendation"],
+  "properties": {
+    "member": {
+      "type": "string"
+    },
+    "discussion_reply": {
+      "type": "string"
+    },
+    "revised_recommendation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recommendation", "short_reasoning", "pros", "cons", "confidence"],
+      "properties": {
+        "recommendation": {
+          "type": "string"
+        },
+        "short_reasoning": {
+          "type": "string"
+        },
+        "pros": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "maxItems": 4
+        },
+        "cons": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "maxItems": 4
+        },
+        "confidence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        }
+      }
+    }
+  }
+}

@@ -114,6 +114,24 @@ async def run_member(
     return CodexResult(member=member, payload=payload, stdout=stdout, stderr=stderr)
 
 
+async def run_secretary_model(
+    config: dict[str, Any],
+    model: str,
+    prompt: str,
+    schema_path: Path,
+    phase: str,
+) -> dict[str, Any]:
+    secretary = Member(
+        name="Secretary",
+        model=model,
+        personality="non-voting progress reporter",
+        is_president=False,
+        created_at="runtime",
+    )
+    result = await run_member(config, secretary, prompt, schema_path, phase, False)
+    return result.payload
+
+
 async def run_many(
     config: dict[str, Any],
     jobs: list[tuple[Member, str, Path, str, bool]],

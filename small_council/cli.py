@@ -22,12 +22,13 @@ from .formatting import render_fallback
 from .memory import append_decision_memory, load_recent_memory
 from .prompts import (
     discussion_prompt,
+    discussion_round_prompt,
     equivalence_prompt,
     president_summary_prompt,
     research_prompt,
     runoff_prompt,
 )
-from .secretary import Secretary
+from .secretary import BaseSecretary, SecretaryConfig, create_secretary
 from .state import (
     ensure_state,
     persist_leaderboard,
@@ -49,7 +50,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--add-members", type=_positive_int, metavar="N", help="Add N new council members.")
     parser.add_argument("--remove-members", type=_positive_int, metavar="N", help="Remove N council members from the end of the roster.")
     parser.add_argument("--set-runoff-rounds", type=_positive_int, metavar="N", help="Use N runoff rounds for tied decisions in this run.")
-    parser.add_argument("--set-update-interval", type=_positive_int, metavar="N", help="Set Secretary progress update interval in seconds for this run.")
+    parser.add_argument("--secretary", choices=("local", "model"), help="Use local or model-backed Secretary progress reports.")
+    parser.add_argument("--secretary-verbosity", choices=("low", "balanced", "high"), help="Set model-backed Secretary verbosity for this run.")
+    parser.add_argument(
+        "--no-secretary-immediate-updates",
+        dest="secretary_immediate_updates",
+        action="store_false",
+        help="Disable the short immediate Secretary updates but keep milestone summaries.",
+    )
     parser.add_argument("--set-diversity", choices=("low", "balanced", "high"), help="Set proposal diversity mode for this run.")
     parser.add_argument("--json-output", action="store_true", help="Print the final decision payload as JSON.")
     parser.add_argument("--no-search", action="store_true", help="Disable Codex web search during independent research.")
@@ -99,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
                 question,
                 web_search=not args.no_search,
                 max_runoff_rounds=_runoff_rounds(config, args),
-                update_interval_seconds=_update_interval(config, args),
+                secretary_config=_secretary_config(config, args),
                 diversity_mode=_diversity_mode(config, args),
             )
         )
@@ -152,10 +160,25 @@ def _runoff_rounds(config: dict, args: argparse.Namespace) -> int:
     return int(config.get("council", {}).get("runoff_rounds", 3))
 
 
-def _update_interval(config: dict, args: argparse.Namespace) -> int:
-    if args.set_update_interval is not None:
-        return args.set_update_interval
-    return int(config.get("council", {}).get("update_interval_seconds", 5))
+def _secretary_config(config: dict, args: argparse.Namespace) -> SecretaryConfig:
+    council_config = config.get("council", {})
+    secretary_config = council_config.get("secretary", {})
+    mode = args.secretary or str(secretary_config.get("mode", "model"))
+    if mode not in {"local", "model"}:
+        raise ValueError(f"Invalid council.secretary.mode: {mode}")
+
+    verbosity = args.secretary_verbosity or str(secretary_config.get("verbosity", "balanced"))
+    if verbosity not in {"low", "balanced", "high"}:
+        raise ValueError(f"Invalid council.secretary.verbosity: {verbosity}")
+
+    model = str(secretary_config.get("model", "gpt-5.4-mini"))
+    immediate_updates = getattr(args, "secretary_immediate_updates", True)
+    return SecretaryConfig(
+        mode=mode,
+        model=model,
+        verbosity=verbosity,
+        immediate_updates=immediate_updates,
+    )
 
 
 def _diversity_mode(config: dict, args: argparse.Namespace) -> str:
@@ -167,20 +190,25 @@ def _diversity_mode(config: dict, args: argparse.Namespace) -> str:
     return mode
 
 
+def _discussion_rounds(config: dict) -> int:
+    return int(config.get("council", {}).get("discussion_rounds", 2))
+
+
 async def _run_decision(
     config: dict,
     members,
     question: str,
     web_search: bool,
     max_runoff_rounds: int,
-    update_interval_seconds: int,
+    secretary_config: SecretaryConfig,
     diversity_mode: str,
 ) -> dict:
     research_schema = ROOT / "schemas" / "recommendation.schema.json"
     equivalence_schema = ROOT / "schemas" / "equivalence.schema.json"
     vote_schema = ROOT / "schemas" / "vote.schema.json"
     summary_schema = ROOT / "schemas" / "summary.schema.json"
-    secretary = Secretary(update_interval_seconds)
+    discussion_schema = ROOT / "schemas" / "discussion.schema.json"
+    secretary = create_secretary(config, secretary_config)
     await secretary.start(question)
 
     try:
@@ -212,19 +240,116 @@ async def _run_decision(
                 result.member.name, result.payload.get("recommendation", "recommendation complete")
             ),
         )
-        recommendations = [
+        draft_recommendations = [
             validate_recommendation(result.payload, result.member) for result in research_results
         ]
+        current_recommendations = draft_recommendations
+        await secretary.report_milestone("initial proposals complete")
+
+        discussion_transcript: list[dict[str, object]] = [
+            {
+                "type": "draft_proposal",
+                "member": item["proposer"],
+                "recommendation": item["recommendation"],
+                "short_reasoning": item["short_reasoning"],
+                "pros": item["pros"],
+                "cons": item["cons"],
+                "confidence": item["confidence"],
+            }
+            for item in draft_recommendations
+        ]
+
+        discussion_round_count = _discussion_rounds(config)
+        secretary.set_phase("threaded discussion")
+        discussion_round_payloads: list[dict[str, object]] = []
+        for discussion_round in range(1, discussion_round_count + 1):
+            secretary.discussion_round_started(discussion_round)
+            discussion_jobs = [
+                (
+                    member,
+                    discussion_round_prompt(
+                        member,
+                        question,
+                        current_recommendations,
+                        discussion_transcript,
+                        discussion_round,
+                        discussion_round_count,
+                    ),
+                    discussion_schema,
+                    f"discussion-{discussion_round}",
+                    False,
+                )
+                for member in members
+            ]
+            discussion_results = await _run_jobs_with_secretary(
+                config,
+                discussion_jobs,
+                secretary,
+                lambda result, round_number=discussion_round, baseline=current_recommendations: _secretary_discussion_done(
+                    result, secretary, baseline, round_number
+                ),
+            )
+            round_messages = []
+            next_recommendations = []
+            result_by_member = {result.member.name: result for result in discussion_results}
+            for member in members:
+                result = result_by_member[member.name]
+                discussion_reply = str(result.payload.get("discussion_reply", "")).strip()
+                revised_payload = result.payload.get("revised_recommendation", {})
+                revised_recommendation = validate_recommendation(revised_payload, result.member)
+                prior_recommendation = _recommendation_for_proposer(
+                    current_recommendations, member.name
+                )
+                changed = _normalize_option(
+                    revised_recommendation.get("recommendation", "")
+                ) != _normalize_option(prior_recommendation.get("recommendation", ""))
+                round_messages.append(
+                    {
+                        "member": member.name,
+                        "discussion_reply": discussion_reply,
+                        "prior_recommendation": prior_recommendation.get("recommendation"),
+                        "revised_recommendation": revised_recommendation.get("recommendation"),
+                        "changed": changed,
+                    }
+                )
+                discussion_transcript.append(
+                    {
+                        "round": discussion_round,
+                        "member": member.name,
+                        "discussion_reply": discussion_reply,
+                        "prior_recommendation": prior_recommendation.get("recommendation"),
+                        "revised_recommendation": revised_recommendation,
+                        "changed": changed,
+                    }
+                )
+                next_recommendations.append(revised_recommendation)
+            current_recommendations = next_recommendations
+            discussion_round_payloads.append(
+                {
+                    "round_number": discussion_round,
+                    "messages": round_messages,
+                }
+            )
+            secretary.discussion_round_done(discussion_round)
+            await secretary.report_milestone(f"discussion round {discussion_round} complete")
+
+        secretary.set_phase("finalizing proposals")
+        for recommendation in current_recommendations:
+            secretary.final_recommendation_done(
+                recommendation["proposer"], recommendation["recommendation"]
+            )
+        await secretary.report_milestone("final proposals complete")
 
         secretary.set_phase("grouping equivalent proposals")
         recommendation_groups = await _group_recommendations(
             config,
             president(members),
             question,
-            recommendations,
+            current_recommendations,
             equivalence_schema,
         )
         secretary.grouping_done(recommendation_groups)
+        await secretary.report_milestone("proposal grouping complete")
         voting_recommendations = canonical_recommendations(recommendation_groups)
 
         secretary.set_phase("holding discussion and initial vote")
@@ -253,6 +378,7 @@ async def _run_decision(
         all_votes = votes[:]
         vote_rounds = [evaluate_vote_round(voting_recommendations, votes, 0)]
         secretary.vote_round_done(_round_summary(vote_rounds[-1]))
+        await secretary.report_milestone("initial vote complete")
         current_recommendations = voting_recommendations
 
         for runoff_round in range(1, max_runoff_rounds + 1):
@@ -297,12 +423,13 @@ async def _run_decision(
             all_votes.extend(runoff_votes)
             vote_rounds.append(evaluate_vote_round(current_recommendations, runoff_votes, runoff_round))
             secretary.vote_round_done(_round_summary(vote_rounds[-1]))
+            await secretary.report_milestone(f"runoff round {runoff_round} complete")
 
         decision = decision_from_rounds(voting_recommendations, vote_rounds)
         updated = update_after_decision(
             config=config,
             members=members,
-            proposing_members={item["proposer"] for item in recommendations},
+            proposing_members={item["proposer"] for item in draft_recommendations},
             winning_member=decision.winning_member,
             voter_names={item["voter"] for item in all_votes},
             tie_breaker_member=None,
@@ -326,7 +453,7 @@ async def _run_decision(
             config,
             president(updated),
             question,
-            recommendations,
+            current_recommendations,
             all_votes,
             winner_payload,
             leaderboard,
@@ -342,7 +469,10 @@ async def _run_decision(
             "winning_member": decision.winning_member,
             "winning_members": decision.winning_members,
             "final_tied_options": decision.tied_options,
-            "recommendations": recommendations,
+            "draft_recommendations": draft_recommendations,
+            "final_recommendations": current_recommendations,
+            "discussion_rounds": discussion_round_payloads,
+            "discussion_transcript": discussion_transcript,
             "recommendation_groups": recommendation_groups,
             "votes": all_votes,
             "vote_rounds": [round_result.to_dict() for round_result in decision.vote_rounds],
@@ -354,6 +484,45 @@ async def _run_decision(
         }
     finally:
         await secretary.stop()
+
+
+def _recommendation_for_proposer(recommendations: list[dict], proposer: str) -> dict:
+    for recommendation in recommendations:
+        if recommendation.get("proposer") == proposer:
+            return recommendation
+    return {
+        "proposer": proposer,
+        "recommendation": "",
+        "short_reasoning": "",
+        "pros": [],
+        "cons": [],
+        "confidence": 0,
+    }
+
+
+def _normalize_option(value: str) -> str:
+    return str(value).strip().lower().rstrip(".;:!?")
+
+
+def _secretary_discussion_done(
+    result,
+    secretary: BaseSecretary,
+    baseline_recommendations: list[dict],
+    round_number: int,
+) -> None:
+    revised = validate_recommendation(result.payload.get("revised_recommendation", {}), result.member)
+    prior = _recommendation_for_proposer(baseline_recommendations, result.member.name)
+    changed = _normalize_option(revised.get("recommendation", "")) != _normalize_option(
+        prior.get("recommendation", "")
+    )
+    secretary.state and secretary.discussion_message_done(
+        round_number,
+        result.member.name,
+        result.payload.get("discussion_reply", ""),
+        prior.get("recommendation", ""),
+        revised.get("recommendation", ""),
+        changed,
+    )
 
 
 async def _group_recommendations(
@@ -378,7 +547,9 @@ async def _group_recommendations(
     return validate_recommendation_groups(groups, recommendations)
 
 
-def _secretary_vote_done(result, secretary: Secretary, groups: list[dict], round_number: int) -> None:
+def _secretary_vote_done(
+    result, secretary: BaseSecretary, groups: list[dict], round_number: int
+) -> None:
     vote = canonicalize_vote(result.payload, groups)
     secretary.vote_done(result.member.name, vote.get("selected_option", "abstain"), round_number)
 
@@ -408,7 +579,9 @@ def _assign_diversity_lanes(members, diversity_mode: str) -> dict[str, str]:
     return {member.name: lanes[index % len(lanes)] for index, member in enumerate(members)}
 
 
-async def _run_jobs_with_secretary(config: dict, jobs: list[tuple], secretary: Secretary, on_result):
+async def _run_jobs_with_secretary(
+    config: dict, jobs: list[tuple], secretary: BaseSecretary, on_result
+):
     tasks = [
         asyncio.create_task(run_member(config, member, prompt, schema, phase, web_search))
         for member, prompt, schema, phase, web_search in jobs
