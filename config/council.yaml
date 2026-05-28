@@ -1,8 +1,12 @@
 council:
   min_members: 1
+  discussion_rounds: 2
   runoff_rounds: 3
-  update_interval_seconds: 5
   diversity_mode: balanced
+  secretary:
+    mode: model
+    model: gpt-5.4-mini
+    verbosity: balanced
   member_names:
     - Aurelia
     - Bram

@@ -67,9 +67,44 @@ The user asks: {question!r}
 Initial recommendations from the council:
 {json.dumps(recommendations, indent=2)}
 
-Briefly critique the alternatives. You may revise your preferred option.
-Then vote. Prefer not to vote for your own proposal; if you do, include a specific justification.
+You are casting the council's first vote after final proposals have already been revised.
+Choose one recommendation. Prefer not to vote for your own proposal; if you do, include a specific justification.
 Abstain only if there is no responsible choice.
+"""
+
+
+def discussion_round_prompt(
+    member: Member,
+    question: str,
+    draft_recommendations: list[dict],
+    discussion_transcript: list[dict],
+    round_number: int,
+    total_rounds: int,
+) -> str:
+    return f"""{BASE_RULES}
+
+Council member:
+- Name: {member.name}
+- Model: {member.model}
+- Personality: {member.personality}
+- President: {member.is_president}
+
+The user asks: {question!r}
+
+You are in threaded discussion round {round_number} of {total_rounds}.
+Initial draft recommendations:
+{json.dumps(draft_recommendations, indent=2)}
+
+Full discussion transcript so far:
+{json.dumps(discussion_transcript, indent=2)}
+
+Talk directly to the other members' points. Be concise, practical, and specific.
+You may consult, agree, disagree, or pivot.
+Return:
+- member: your name
+- discussion_reply: a short visible reply to the council
+- revised_recommendation: your updated recommendation after this round
+Keep the reply human-readable and brief.
 """
 
 
@@ -166,4 +201,29 @@ Respect the computed winner and votes exactly.
 If status is "resolved", present the winning option normally.
 If winning_members has more than one member, mention the shared winning proposers by name.
 If status is "unresolved_tie", do not invent a winner. Say no single winner emerged after the configured runoff rounds and present all remaining tied options as equally viable choices.
+"""
+
+
+def secretary_report_prompt(question: str, state: dict, verbosity: str, milestone: str) -> str:
+    return f"""{BASE_RULES}
+
+You are the non-voting Secretary of the Small Council.
+You report visible progress to the user while the council is still working.
+
+The user asks: {question!r}
+
+Current council state:
+{json.dumps(state, indent=2)}
+
+Completed milestone: {milestone}
+
+Verbosity: {verbosity}
+
+Write one useful progress update for stderr.
+Do not vote, do not recommend an option, and do not invent unfinished outcomes.
+Only summarize visible completed progress from the completed milestone and current state.
+If verbosity is "low", use one short sentence.
+If verbosity is "balanced", use two or three concise sentences.
+If verbosity is "high", include a compact bullet-style summary with the most important new progress.
+Return only JSON matching the supplied schema.
 """
