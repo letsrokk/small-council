@@ -20,6 +20,7 @@ from .decision import (
 )
 from .formatting import render_fallback
 from .memory import append_decision_memory, load_recent_memory
+from .output import BaseRenderer, RunContext, render_leaderboard_text, render_members_text, select_renderer
 from .prompts import (
     discussion_prompt,
     discussion_round_prompt,
@@ -59,6 +60,8 @@ def main(argv: list[str] | None = None) -> int:
         help="Disable the short immediate Secretary updates but keep milestone summaries.",
     )
     parser.add_argument("--set-diversity", choices=("low", "balanced", "high"), help="Set proposal diversity mode for this run.")
+    parser.add_argument("--plain-output", action="store_true", help="Force plain human-readable output.")
+    parser.add_argument("--rich-output", action="store_true", help="Force Rich terminal output.")
     parser.add_argument("--json-output", action="store_true", help="Print the final decision payload as JSON.")
     parser.add_argument("--no-search", action="store_true", help="Disable Codex web search during independent research.")
     parser.add_argument("--doctor", action="store_true", help="Check local Codex CLI availability.")
@@ -66,6 +69,7 @@ def main(argv: list[str] | None = None) -> int:
 
     config = load_config()
     _ensure_dirs(config)
+    renderer = None
 
     if args.doctor:
         try:
@@ -75,6 +79,12 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         return 0
 
+    try:
+        renderer = select_renderer(args, sys.stdout, sys.stderr, sys.stdin)
+    except RuntimeError as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+
     members = ensure_state(config, reset=args.reset)
     try:
         members = _maybe_resize_members(config, members, args, parser)
@@ -83,16 +93,28 @@ def main(argv: list[str] | None = None) -> int:
     write_agent_files(members)
 
     if args.init:
-        _print_members(members)
+        if renderer:
+            renderer.render_members(members)
+        else:
+            print(render_members_text(members))
         return 0
 
     if args.members:
-        print(_members_table(members))
+        if renderer:
+            renderer.render_members(members)
+        else:
+            print(render_members_text(members))
         return 0
 
     if args.leaderboard:
         persist_leaderboard(config, members)
-        print(_leaderboard_text(config))
+        leaderboard = read_json(resolve_project_path(config["storage"]["leaderboard_path"]), {})[
+            "leaderboard"
+        ]
+        if renderer:
+            renderer.render_leaderboard(leaderboard)
+        else:
+            print(render_leaderboard_text(leaderboard))
         return 0
 
     question = " ".join(args.question).strip()
@@ -100,6 +122,21 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("provide a decision prompt, or use --init/--members/--leaderboard/--doctor")
 
     try:
+        secretary_config = _secretary_config(config, args)
+        if renderer:
+            renderer.start_run(
+                RunContext(
+                    question=question,
+                    member_count=len(members),
+                    diversity_mode=_diversity_mode(config, args),
+                    secretary_mode=secretary_config.mode,
+                    secretary_verbosity=secretary_config.verbosity,
+                    discussion_rounds=_discussion_rounds(config),
+                    runoff_round_limit=_runoff_rounds(config, args),
+                    web_search_enabled=not args.no_search,
+                )
+            )
+            _seed_renderer_members(renderer, members)
         payload = asyncio.run(
             _run_decision(
                 config,
@@ -107,19 +144,28 @@ def main(argv: list[str] | None = None) -> int:
                 question,
                 web_search=not args.no_search,
                 max_runoff_rounds=_runoff_rounds(config, args),
-                secretary_config=_secretary_config(config, args),
+                secretary_config=secretary_config,
                 diversity_mode=_diversity_mode(config, args),
+                renderer=renderer,
             )
         )
     except Exception as exc:
-        print(f"Council failed: {exc}", file=sys.stderr)
+        if renderer:
+            renderer.error(f"Council failed: {exc}")
+        else:
+            print(f"Council failed: {exc}", file=sys.stderr)
         print(
             "\nProject-local Codex state is stored in ./.codex. "
             "If this is the first run, authenticate locally with: "
             "CODEX_HOME=$PWD/.codex codex login",
             file=sys.stderr,
         )
+        if renderer:
+            renderer.close()
         return 1
+    if renderer:
+        renderer.final_decision(payload)
+        renderer.close()
     if args.json_output:
         print(render_json_decision(payload))
     else:
@@ -202,13 +248,14 @@ async def _run_decision(
     max_runoff_rounds: int,
     secretary_config: SecretaryConfig,
     diversity_mode: str,
+    renderer: BaseRenderer | None = None,
 ) -> dict:
     research_schema = ROOT / "schemas" / "recommendation.schema.json"
     equivalence_schema = ROOT / "schemas" / "equivalence.schema.json"
     vote_schema = ROOT / "schemas" / "vote.schema.json"
     summary_schema = ROOT / "schemas" / "summary.schema.json"
     discussion_schema = ROOT / "schemas" / "discussion.schema.json"
-    secretary = create_secretary(config, secretary_config)
+    secretary = create_secretary(config, secretary_config, renderer=renderer)
     await secretary.start(question)
 
     try:
@@ -236,6 +283,7 @@ async def _run_decision(
             config,
             research_jobs,
             secretary,
+            renderer,
             lambda result: secretary.recommendation_done(
                 result.member.name, result.payload.get("recommendation", "recommendation complete")
             ),
@@ -285,6 +333,7 @@ async def _run_decision(
                 config,
                 discussion_jobs,
                 secretary,
+                renderer,
                 lambda result, round_number=discussion_round, baseline=current_recommendations: _secretary_discussion_done(
                     result, secretary, baseline, round_number
                 ),
@@ -367,6 +416,7 @@ async def _run_decision(
             config,
             discussion_jobs,
             secretary,
+            renderer,
             lambda result: _secretary_vote_done(result, secretary, recommendation_groups, 0),
         )
         votes = [
@@ -409,6 +459,7 @@ async def _run_decision(
                 config,
                 runoff_jobs,
                 secretary,
+                renderer,
                 lambda result, round_number=runoff_round: _secretary_vote_done(
                     result, secretary, recommendation_groups, round_number
                 ),
@@ -580,20 +631,30 @@ def _assign_diversity_lanes(members, diversity_mode: str) -> dict[str, str]:
 
 
 async def _run_jobs_with_secretary(
-    config: dict, jobs: list[tuple], secretary: BaseSecretary, on_result
+    config: dict,
+    jobs: list[tuple],
+    secretary: BaseSecretary,
+    renderer: BaseRenderer | None,
+    on_result,
 ):
-    tasks = [
-        asyncio.create_task(run_member(config, member, prompt, schema, phase, web_search))
-        for member, prompt, schema, phase, web_search in jobs
-    ]
+    tasks = []
+    for member, prompt, schema, phase, web_search in jobs:
+        if renderer:
+            renderer.member_status(member.name, f"running {phase}")
+        task = asyncio.create_task(run_member(config, member, prompt, schema, phase, web_search))
+        tasks.append(task)
     results = []
     try:
         for task in asyncio.as_completed(tasks):
             result = await task
             results.append(result)
+            if renderer:
+                renderer.member_status(result.member.name, "completed")
             on_result(result)
         return results
     except Exception:
+        if renderer:
+            renderer.error("A council member run failed; cancelling remaining tasks.")
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -695,54 +756,32 @@ def _ensure_dirs(config: dict) -> None:
                 path.mkdir(parents=True, exist_ok=True)
 
 
+def _seed_renderer_members(renderer: BaseRenderer, members) -> None:
+    for member in members:
+        renderer.member_event(
+            member.name,
+            "member_registered",
+            "",
+            payload={
+                "model": member.model,
+                "role": "President" if member.is_president else "Member",
+                "status": "queued",
+                "phase": "starting",
+            },
+        )
+
+
 def _print_members(members) -> None:
-    print(_members_table(members))
+    print(render_members_text(members))
 
 
 def _leaderboard_text(config: dict) -> str:
     payload = read_json(resolve_project_path(config["storage"]["leaderboard_path"]), {"leaderboard": []})
-    rows = []
-    for rank, row in enumerate(payload["leaderboard"], start=1):
-        rows.append(
-            {
-                "Rank": rank,
-                "Member": row["member"],
-                "Role": "President" if row["president"] else "Member",
-                "Wins": row["total_wins"],
-                "Proposals": row["total_proposals"],
-                "Win Rate": f"{row['win_rate']:.0%}",
-                "Votes": row["vote_participation"],
-                "Tie Breaks": row["tie_break_victories"],
-                "Model": row["model"],
-            }
-        )
-    return "Leaderboard\n" + _format_table(
-        ["Rank", "Member", "Role", "Wins", "Proposals", "Win Rate", "Votes", "Tie Breaks", "Model"],
-        rows,
-        right_align={"Rank", "Wins", "Proposals", "Votes", "Tie Breaks"},
-    )
+    return render_leaderboard_text(payload["leaderboard"])
 
 
 def _members_table(members) -> str:
-    rows = []
-    for member in members:
-        rows.append(
-            {
-                "Name": member.name,
-                "Role": "President" if member.is_president else "Member",
-                "Model": member.model,
-                "Personality": member.personality,
-                "Wins": member.total_wins,
-                "Proposals": member.total_proposals,
-                "Votes": member.total_votes_cast,
-                "Tie Breaks": member.tie_break_victories,
-            }
-        )
-    return "Council Members\n" + _format_table(
-        ["Name", "Role", "Model", "Personality", "Wins", "Proposals", "Votes", "Tie Breaks"],
-        rows,
-        right_align={"Wins", "Proposals", "Votes", "Tie Breaks"},
-    )
+    return render_members_text(members)
 
 
 def _format_table(

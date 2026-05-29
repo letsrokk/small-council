@@ -22,6 +22,46 @@ class LocalSecretaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("collecting independent research", stream.getvalue())
         await secretary.stop()
 
+    async def test_renderer_receives_secretary_and_member_events(self) -> None:
+        class RecordingRenderer:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def start_run(self, context) -> None:
+                self.calls.append(("start_run", context.question, context.phase))
+
+            def update_phase(self, phase: str) -> None:
+                self.calls.append(("update_phase", phase))
+
+            def secretary_message(self, message: str, event_type: str = "milestone") -> None:
+                self.calls.append(("secretary_message", message))
+
+            def member_event(self, member_name: str, event_type: str, message: str, payload=None) -> None:
+                self.calls.append(("member_event", member_name, event_type, message, payload or {}))
+
+            def member_status(self, member_name: str, status: str) -> None:
+                self.calls.append(("member_status", member_name, status))
+
+        renderer = RecordingRenderer()
+        secretary = LocalSecretary(io.StringIO(), renderer=renderer)
+        await secretary.start("Pick dinner")
+        secretary.set_phase("collecting independent research")
+        secretary.diversity_lanes_assigned({"Aurelia": "safest pick"}, "balanced")
+        secretary.recommendation_done("Aurelia", "Pick sushi")
+        secretary.discussion_round_started(1)
+        secretary.discussion_message_done(1, "Aurelia", "Fine.", "Pick sushi", "Pick ramen", True)
+        secretary.final_recommendation_done("Aurelia", "Pick ramen")
+        secretary.vote_done("Aurelia", "Pick ramen", 0)
+        secretary.grouping_done([])
+        await secretary.report_milestone("initial proposals complete")
+
+        self.assertTrue(any(call[0] == "update_phase" for call in renderer.calls))
+        self.assertTrue(any(call[:3] == ("member_event", "Aurelia", "proposal_ready") for call in renderer.calls))
+        self.assertTrue(any(call[:3] == ("member_event", "Aurelia", "discussion_reply") for call in renderer.calls))
+        self.assertTrue(any(call[:3] == ("member_event", "Aurelia", "vote") for call in renderer.calls))
+        self.assertTrue(any(call[0] == "secretary_message" and "initial proposals complete" in call[1] for call in renderer.calls))
+        await secretary.stop()
+
     async def test_immediate_event_updates_emit_short_local_reports(self) -> None:
         stream = io.StringIO()
         secretary = LocalSecretary(stream)

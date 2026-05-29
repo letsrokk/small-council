@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, TextIO
 
 from .config import ROOT
+from .output import BaseRenderer
 from .prompts import secretary_report_prompt
 
 
@@ -35,15 +36,21 @@ class SecretaryState:
 
 
 class BaseSecretary:
-    def __init__(self, stream: TextIO | None = None, immediate_updates: bool = True) -> None:
+    def __init__(
+        self,
+        stream: TextIO | None = None,
+        immediate_updates: bool = True,
+        renderer: BaseRenderer | None = None,
+    ) -> None:
         self.stream = stream or sys.stderr
         self.state: SecretaryState | None = None
         self._milestone: str = ""
         self._immediate_updates = immediate_updates
+        self._renderer = renderer
 
     async def start(self, question: str) -> None:
         self.state = SecretaryState(question=question)
-        self._write_block(["Secretary", f"Request received: {str(question).strip()}"])
+        self._emit_secretary_message(f"Request received: {str(question).strip()}")
 
     async def stop(self) -> None:
         return None
@@ -51,11 +58,19 @@ class BaseSecretary:
     def set_phase(self, phase: str) -> None:
         if self.state:
             self.state.phase = phase
+        if self._renderer:
+            self._renderer.update_phase(phase)
 
     def recommendation_done(self, member: str, recommendation: str) -> None:
         if self.state:
             self.state.draft_recommendations.append(
                 {"member": _clean_text(member), "recommendation": _clean_text(recommendation)}
+            )
+            self._emit_member_event(
+                member,
+                "proposal_ready",
+                recommendation,
+                payload={"recommendation": recommendation, "status": "research complete"},
             )
             self._write_immediate_status(f"{_clean_text(member)} finished research.")
 
@@ -63,6 +78,12 @@ class BaseSecretary:
         if self.state:
             self.state.final_recommendations.append(
                 {"member": _clean_text(member), "recommendation": _clean_text(recommendation)}
+            )
+            self._emit_member_event(
+                member,
+                "final_proposal",
+                recommendation,
+                payload={"recommendation": recommendation, "status": "final proposal ready"},
             )
             self._write_immediate_status(f"{_clean_text(member)} finalized a proposal.")
 
@@ -75,6 +96,16 @@ class BaseSecretary:
                     "round_label": _round_label(round_number),
                 }
             )
+            self._emit_member_event(
+                member,
+                "vote",
+                selected_option,
+                payload={
+                    "selected_option": selected_option,
+                    "round_label": _round_label(round_number),
+                    "status": "voted",
+                },
+            )
             self._write_immediate_status(
                 f"{_clean_text(member)} voted in the {_round_label(round_number)}."
             )
@@ -82,14 +113,20 @@ class BaseSecretary:
     def vote_round_done(self, description: str) -> None:
         if self.state:
             self.state.vote_rounds.append(_clean_text(description))
-            self._write_status(_clean_text(description))
+            if self._renderer:
+                self._emit_secretary_message(_clean_text(description))
+            else:
+                self._write_status(_clean_text(description))
 
     def discussion_round_started(self, round_number: int) -> None:
         if self.state:
             self.state.discussion_rounds.append(
                 {"round_number": round_number, "messages": [], "completed": False}
             )
-            self._write_immediate_status(f"Discussion round {round_number} started.")
+            if self._renderer:
+                self._emit_secretary_message(f"Discussion round {round_number} started.")
+            else:
+                self._write_immediate_status(f"Discussion round {round_number} started.")
 
     def discussion_message_done(
         self,
@@ -113,6 +150,18 @@ class BaseSecretary:
                         "changed": changed,
                     }
                 )
+                self._emit_member_event(
+                    member,
+                    "discussion_reply",
+                    discussion_reply,
+                    payload={
+                        "discussion_reply": discussion_reply,
+                        "prior_recommendation": prior_recommendation,
+                        "revised_recommendation": revised_recommendation,
+                        "changed": changed,
+                        "status": "discussing",
+                    },
+                )
                 self._write_immediate_status(
                     f"{_clean_text(member)} finished discussion round {round_number}."
                 )
@@ -124,6 +173,7 @@ class BaseSecretary:
         for round_state in self.state.discussion_rounds:
             if round_state.get("round_number") == round_number:
                 round_state["completed"] = True
+                self._emit_secretary_message(f"Discussion round {round_number} complete.")
                 return
 
     def diversity_lanes_assigned(self, lanes: dict[str, str], mode: str) -> None:
@@ -131,17 +181,32 @@ class BaseSecretary:
             return
         self.state.diversity_lanes = dict(lanes)
         self.state.diversity_mode = mode
+        for member_name, lane in lanes.items():
+            self._emit_member_event(
+                member_name,
+                "lane_assigned",
+                lane,
+                payload={"lane": lane, "mode": mode, "status": "assigned diversity lane"},
+            )
         self._write_immediate_status(f"Diversity lanes assigned for {_clean_text(mode)} mode.")
 
     def grouping_done(self, groups: list[dict[str, object]]) -> None:
         merged = [group for group in groups if len(group.get("proposers", [])) > 1]
         if not merged:
-            self._write_immediate_status("Grouped proposals: no equivalent proposals found.")
+            if self._renderer:
+                self._emit_secretary_message("Grouped proposals: no equivalent proposals found.")
+            else:
+                self._write_immediate_status("Grouped proposals: no equivalent proposals found.")
             return
-        self._write_immediate_status(f"Grouped {len(merged)} equivalent proposal set(s).")
+        if self._renderer:
+            self._emit_secretary_message(f"Grouped {len(merged)} equivalent proposal set(s).")
+        else:
+            self._write_immediate_status(f"Grouped {len(merged)} equivalent proposal set(s).")
 
     async def report_milestone(self, label: str) -> bool:
         self._milestone = _clean_text(label)
+        if self._renderer:
+            self._renderer.secretary_message(f"{self._milestone}")
         return await self._emit_report()
 
     async def _emit_report(self) -> bool:
@@ -155,6 +220,9 @@ class BaseSecretary:
         return snapshot
 
     def _write_block(self, lines: list[str]) -> None:
+        if self._renderer:
+            self._renderer.secretary_message("\n".join(lines))
+            return
         timestamp = datetime.now().strftime("%H:%M:%S")
         if not lines:
             return
@@ -169,6 +237,26 @@ class BaseSecretary:
     def _write_immediate_status(self, message: str) -> None:
         if self._immediate_updates:
             self._write_status(message)
+
+    def _emit_secretary_message(self, message: str) -> None:
+        if self._renderer:
+            self._renderer.secretary_message(message)
+        else:
+            self._write_status(message)
+
+    def _emit_member_event(
+        self,
+        member: str,
+        event_type: str,
+        message: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        if self._renderer:
+            self._renderer.member_event(member, event_type, message, payload=payload)
+
+    def _emit_member_status(self, member: str, status: str) -> None:
+        if self._renderer:
+            self._renderer.member_status(member, status)
 
 
 class LocalSecretary(BaseSecretary):
@@ -228,8 +316,9 @@ class ModelBackedSecretary(LocalSecretary):
         stream: TextIO | None = None,
         model_reporter: ModelReporter | None = None,
         immediate_updates: bool = True,
+        renderer: BaseRenderer | None = None,
     ) -> None:
-        super().__init__(stream, immediate_updates=immediate_updates)
+        super().__init__(stream, immediate_updates=immediate_updates, renderer=renderer)
         self.config = config
         self.model = model
         self.verbosity = verbosity
@@ -287,6 +376,7 @@ def create_secretary(
     config: dict[str, Any],
     secretary_config: SecretaryConfig,
     stream: TextIO | None = None,
+    renderer: BaseRenderer | None = None,
 ) -> BaseSecretary:
     if secretary_config.mode == "model":
         return ModelBackedSecretary(
@@ -295,8 +385,13 @@ def create_secretary(
             verbosity=secretary_config.verbosity,
             stream=stream,
             immediate_updates=secretary_config.immediate_updates,
+            renderer=renderer,
         )
-    return LocalSecretary(stream, immediate_updates=secretary_config.immediate_updates)
+    return LocalSecretary(
+        stream,
+        immediate_updates=secretary_config.immediate_updates,
+        renderer=renderer,
+    )
 
 
 Secretary = LocalSecretary
