@@ -104,6 +104,33 @@ class LocalSecretaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("collecting independent research", stream.getvalue())
         await secretary.stop()
 
+    async def test_agent_failure_emits_immediate_retry_and_final_updates(self) -> None:
+        class RecordingRenderer:
+            def __init__(self) -> None:
+                self.statuses = []
+                self.messages = []
+
+            def member_status(self, member_name: str, status: str) -> None:
+                self.statuses.append((member_name, status))
+
+            def secretary_message(self, message: str, event_type: str = "milestone") -> None:
+                self.messages.append(message)
+
+        stream = io.StringIO()
+        renderer = RecordingRenderer()
+        secretary = LocalSecretary(stream, renderer=renderer)
+        await secretary.start("Pick dinner")
+
+        secretary.agent_run_failed("Aurelia", "research", "temporary failure", True, 1, 3)
+        secretary.agent_run_failed("Aurelia", "research", "temporary failure", False, 3, 3)
+
+        output = "\n".join(renderer.messages)
+        self.assertIn("Aurelia failed research; retrying (1/3): temporary failure", output)
+        self.assertIn("Aurelia failed research: temporary failure", output)
+        self.assertIn(("Aurelia", "retrying"), renderer.statuses)
+        self.assertIn(("Aurelia", "failed"), renderer.statuses)
+        await secretary.stop()
+
 
 class ModelBackedSecretaryTests(unittest.IsolatedAsyncioTestCase):
     async def test_model_report_invoked_per_milestone(self) -> None:

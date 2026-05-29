@@ -203,6 +203,29 @@ class BaseSecretary:
         else:
             self._write_immediate_status(f"Grouped {len(merged)} equivalent proposal set(s).")
 
+    def agent_run_failed(
+        self,
+        member: str,
+        phase: str,
+        reason: str,
+        retryable: bool,
+        attempt: int,
+        max_attempts: int,
+    ) -> None:
+        member = _clean_text(member)
+        phase = _clean_text(phase)
+        reason = _clean_text(reason)
+        will_retry = retryable and attempt < max_attempts
+        status = "retrying" if will_retry else "failed"
+        if self._renderer:
+            self._renderer.member_status(member, status)
+        if will_retry:
+            self._write_immediate_status(
+                f"{member} failed {phase}; retrying ({attempt}/{max_attempts}): {reason}"
+            )
+        else:
+            self._write_immediate_status(f"{member} failed {phase}: {reason}")
+
     async def report_milestone(self, label: str) -> bool:
         self._milestone = _clean_text(label)
         if self._renderer:

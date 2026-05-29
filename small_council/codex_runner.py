@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from json import JSONDecodeError
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,42 @@ class CodexResult:
 
 
 class CodexUnavailable(RuntimeError):
+    pass
+
+
+class CodexRunError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        member_name: str,
+        phase: str,
+        log_path: Path | None = None,
+        retryable: bool = True,
+        retry_after: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.member_name = member_name
+        self.phase = phase
+        self.log_path = log_path
+        self.retryable = retryable
+        self.retry_after = retry_after
+
+    def __str__(self) -> str:
+        parts = [self.message]
+        if self.retry_after:
+            parts.append(f"Try again at {self.retry_after}.")
+        if self.log_path:
+            parts.append(f"Log: {self.log_path}")
+        return "\n".join(parts)
+
+
+class CodexUsageLimitError(CodexRunError):
+    pass
+
+
+class CodexOutputError(CodexRunError):
     pass
 
 
@@ -103,14 +141,26 @@ async def run_member(
     log_path.write_text(stdout + "\n--- STDERR ---\n" + stderr, encoding="utf-8")
 
     if proc.returncode != 0:
-        raise RuntimeError(
-            f"Codex subagent {member.name} failed in {phase} with exit code {proc.returncode}.\n"
-            f"Log: {log_path}\n{stderr.strip()}"
-        )
+        raise _codex_error_for_exit(member, phase, proc.returncode, stdout, stderr, log_path)
     if not output_path.exists():
-        raise RuntimeError(f"Codex did not write expected output file: {output_path}")
+        raise CodexOutputError(
+            f"Codex subagent {member.name} did not write expected output in {phase}.",
+            member_name=member.name,
+            phase=phase,
+            log_path=log_path,
+            retryable=True,
+        )
 
-    payload = _parse_json(output_path.read_text(encoding="utf-8"))
+    try:
+        payload = _parse_json(output_path.read_text(encoding="utf-8"))
+    except JSONDecodeError as exc:
+        raise CodexOutputError(
+            f"Codex subagent {member.name} wrote invalid JSON in {phase}.",
+            member_name=member.name,
+            phase=phase,
+            log_path=log_path,
+            retryable=True,
+        ) from exc
     return CodexResult(member=member, payload=payload, stdout=stdout, stderr=stderr)
 
 
@@ -165,3 +215,52 @@ def _parse_json(text: str) -> dict[str, Any]:
             lines = lines[:-1]
         stripped = "\n".join(lines).strip()
     return json.loads(stripped)
+
+
+def _codex_error_for_exit(
+    member: Member,
+    phase: str,
+    returncode: int | None,
+    stdout: str,
+    stderr: str,
+    log_path: Path,
+) -> CodexRunError:
+    combined = "\n".join([stdout, stderr])
+    if _is_usage_limit_error(combined):
+        return CodexUsageLimitError(
+            f"Codex usage limit reached while running {member.name} in {phase}.",
+            member_name=member.name,
+            phase=phase,
+            log_path=log_path,
+            retryable=False,
+            retry_after=_retry_after(combined),
+        )
+    return CodexRunError(
+        f"Codex subagent {member.name} failed in {phase} with exit code {returncode}.",
+        member_name=member.name,
+        phase=phase,
+        log_path=log_path,
+        retryable=True,
+    )
+
+
+def _is_usage_limit_error(text: str) -> bool:
+    lowered = text.lower()
+    patterns = [
+        "you've hit your usage limit",
+        "you have hit your usage limit",
+        "usage limit",
+        "out of token",
+        "out-of-token",
+        "quota",
+        "credits",
+        "credit limit",
+    ]
+    return any(pattern in lowered for pattern in patterns)
+
+
+def _retry_after(text: str) -> str | None:
+    match = re.search(r"try again at ([^\n.]+(?:\.[^\n.]+)?)", text, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return None

@@ -5,7 +5,13 @@ import asyncio
 import json
 import sys
 
-from .codex_runner import CodexUnavailable, codex_doctor, run_member
+from .codex_runner import (
+    CodexRunError,
+    CodexUnavailable,
+    CodexUsageLimitError,
+    codex_doctor,
+    run_member,
+)
 from .config import ROOT, load_config, read_json, resolve_project_path
 from .decision import (
     canonical_recommendations,
@@ -149,17 +155,26 @@ def main(argv: list[str] | None = None) -> int:
                 renderer=renderer,
             )
         )
+    except CodexRunError as exc:
+        if renderer:
+            renderer.error(f"Council failed: {exc}")
+        else:
+            print(f"Council failed: {exc}", file=sys.stderr)
+        if renderer:
+            renderer.close()
+        return 1
     except Exception as exc:
         if renderer:
             renderer.error(f"Council failed: {exc}")
         else:
             print(f"Council failed: {exc}", file=sys.stderr)
-        print(
-            "\nProject-local Codex state is stored in ./.codex. "
-            "If this is the first run, authenticate locally with: "
-            "CODEX_HOME=$PWD/.codex codex login",
-            file=sys.stderr,
-        )
+        if isinstance(exc, CodexUnavailable):
+            print(
+                "\nProject-local Codex state is stored in ./.codex. "
+                "If this is the first run, authenticate locally with: "
+                "CODEX_HOME=$PWD/.codex codex login",
+                file=sys.stderr,
+            )
         if renderer:
             renderer.close()
         return 1
@@ -641,7 +656,9 @@ async def _run_jobs_with_secretary(
     for member, prompt, schema, phase, web_search in jobs:
         if renderer:
             renderer.member_status(member.name, f"running {phase}")
-        task = asyncio.create_task(run_member(config, member, prompt, schema, phase, web_search))
+        task = asyncio.create_task(
+            _run_member_with_retries(config, member, prompt, schema, phase, web_search, secretary)
+        )
         tasks.append(task)
     results = []
     try:
@@ -659,6 +676,38 @@ async def _run_jobs_with_secretary(
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
+
+
+async def _run_member_with_retries(
+    config: dict,
+    member,
+    prompt,
+    schema,
+    phase: str,
+    web_search: bool,
+    secretary: BaseSecretary,
+):
+    retries = max(0, int(config.get("codex", {}).get("retries", 2)))
+    max_attempts = retries + 1
+    base_delay = max(0.0, float(config.get("codex", {}).get("retry_base_delay_seconds", 1.0)))
+    attempt = 1
+    while True:
+        try:
+            return await run_member(config, member, prompt, schema, phase, web_search)
+        except CodexUsageLimitError as exc:
+            secretary.agent_run_failed(
+                member.name, phase, exc.message, False, attempt, max_attempts
+            )
+            raise
+        except CodexRunError as exc:
+            retryable = exc.retryable and attempt < max_attempts
+            secretary.agent_run_failed(
+                member.name, phase, exc.message, retryable, attempt, max_attempts
+            )
+            if not retryable:
+                raise
+            await asyncio.sleep(base_delay * (2 ** (attempt - 1)))
+            attempt += 1
 
 
 async def _final_output(

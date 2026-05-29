@@ -76,6 +76,8 @@ codex:
   reasoning_effort: medium
   temperature: null
   project_local_home: ./.codex
+  retries: 2
+  retry_base_delay_seconds: 1.0
 
 storage:
   council_state_path: ./storage/council-state.json
