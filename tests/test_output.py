@@ -11,7 +11,9 @@ from small_council import cli
 from small_council.output import (
     PlainRenderer,
     MemberViewport,
+    MemberViewState,
     RichRenderer,
+    RunContext,
     render_json_decision,
     render_leaderboard_text,
     render_members_text,
@@ -79,6 +81,9 @@ class OutputRenderingTests(unittest.TestCase):
             def refresh(self):
                 self.refresh_calls += 1
 
+            def stop(self):
+                return None
+
         renderer = RichRenderer(rich_module=object())
         renderer._live = DummyLive()
         renderer._render = lambda: "renderable"
@@ -90,6 +95,34 @@ class OutputRenderingTests(unittest.TestCase):
 
         self.assertEqual(3, renderer._live.update_calls)
         self.assertEqual(1, renderer._live.refresh_calls)
+
+    def test_rich_live_refreshes_only_on_events(self) -> None:
+        import rich
+        import rich.box  # noqa: F401
+        import rich.console  # noqa: F401
+        import rich.layout  # noqa: F401
+        import rich.live  # noqa: F401
+        import rich.panel  # noqa: F401
+        import rich.text  # noqa: F401
+
+        output = FakeTTY()
+        renderer = RichRenderer(stdout=output, stderr=output, rich_module=rich, enable_keyboard=False)
+
+        renderer.start_run(
+            RunContext(
+                question="Pick dinner",
+                member_count=1,
+                diversity_mode="balanced",
+                secretary_mode="local",
+                discussion_rounds=2,
+                runoff_round_limit=3,
+                web_search_enabled=False,
+            )
+        )
+        try:
+            self.assertFalse(renderer._live.auto_refresh)
+        finally:
+            renderer.close()
 
     def test_member_viewport_tracks_focus_and_window(self) -> None:
         viewport = MemberViewport(total_count=7, window_size=3, focus_index=0, top_index=0)
@@ -138,6 +171,86 @@ class OutputRenderingTests(unittest.TestCase):
         renderer._console = SimpleNamespace(size=SimpleNamespace(width=90, height=30))
         self.assertTrue(renderer._should_stack_vertically())
         self.assertLess(renderer._left_column_width(), 30)
+
+    def test_model_backed_secretary_gets_at_least_thirty_percent_width(self) -> None:
+        renderer = RichRenderer(rich_module=object())
+        renderer._console = SimpleNamespace(size=SimpleNamespace(width=120, height=30))
+        renderer.context = RunContext(
+            question="Pick dinner",
+            member_count=5,
+            diversity_mode="balanced",
+            secretary_mode="model",
+            secretary_verbosity="balanced",
+            discussion_rounds=2,
+            runoff_round_limit=3,
+            web_search_enabled=False,
+        )
+
+        self.assertGreaterEqual(renderer._left_column_width(), 36)
+
+    def test_long_lines_are_soft_wrapped_for_rich_panels(self) -> None:
+        renderer = RichRenderer(rich_module=object())
+        long_line = "Latest: " + "choose the practical neighborhood option " * 5
+
+        wrapped = renderer._wrap_line(long_line, 32)
+
+        self.assertGreater(len(wrapped), 1)
+        self.assertTrue(all(len(line) <= 32 for line in wrapped))
+
+    def test_member_stack_can_scroll_last_member_into_view_with_tall_cards(self) -> None:
+        renderer = RichRenderer(rich_module=object())
+        renderer._console = SimpleNamespace(size=SimpleNamespace(width=120, height=34))
+        renderer.context = RunContext(
+            question="Pick dinner",
+            member_count=5,
+            diversity_mode="balanced",
+            secretary_mode="model",
+            discussion_rounds=2,
+            runoff_round_limit=3,
+            web_search_enabled=False,
+        )
+        members = [
+            MemberViewState(
+                name=f"Member {index}",
+                latest_detail="A longer update that wraps over multiple visual lines. " * 3,
+            )
+            for index in range(1, 6)
+        ]
+        renderer._viewport.set_total_count(len(members))
+        renderer._viewport.go_end()
+
+        start, end = renderer._visible_member_range(members, renderer._member_card_budget())
+
+        self.assertLess(start, end)
+        self.assertEqual(len(members), end)
+
+    def test_final_decision_is_added_to_secretary_history_with_close_prompt(self) -> None:
+        class DummyLive:
+            def __init__(self) -> None:
+                self.renderable = None
+                self.refresh_calls = 0
+
+            def update(self, renderable, refresh=False):
+                self.renderable = renderable
+
+            def refresh(self):
+                self.refresh_calls += 1
+
+            def stop(self):
+                return None
+
+        renderer = RichRenderer(rich_module=object())
+        live = DummyLive()
+        renderer._live = live
+        renderer._render = lambda: "renderable"
+
+        renderer.final_decision({"final_output": "Watch Train Dreams tonight."})
+        renderer.close()
+
+        history = "\n".join(renderer._secretary_history)
+        self.assertIn("Final decision: Watch Train Dreams tonight.", history)
+        self.assertIn("Press any key to close.", history)
+        self.assertEqual(1, live.refresh_calls)
 
     def test_member_and_leaderboard_text_remain_readable(self) -> None:
         members = [
