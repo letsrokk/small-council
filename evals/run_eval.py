@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import json
+import shutil
 import shlex
 import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
 
 from .models import CaseRunResult, CouncilExecution, EvalReport, EvalRunMetadata
 from .report import PASS_THRESHOLD, write_json_report, write_markdown_report
@@ -66,12 +68,15 @@ def main(argv: list[str] | None = None) -> int:
 
     results: list[CaseRunResult] = []
     total_runs = len(cases) * args.repeat
+    previous_json_path = _backup_previous_report(args.output)
+    _backup_previous_report(args.markdown)
+    suite_start = time.monotonic()
     _print_start(args, cases, total_runs)
     run_index = 0
     for case in cases:
         for repeat_index in range(1, args.repeat + 1):
             run_index += 1
-            _print_case_start(args, run_index, total_runs, case, repeat_index)
+            _print_case_start(args, run_index, total_runs, case, repeat_index, suite_start)
             execution = execute_case(case, args.council_cmd, args.timeout_seconds)
             validation = validate_result(case, execution)
             score = score_case(case, execution, validation)
@@ -87,12 +92,13 @@ def main(argv: list[str] | None = None) -> int:
                 and not validation.hard_failures,
             )
             results.append(result)
-            _print_case_result(args, result)
+            _print_case_result(args, result, suite_start, len(results), total_runs)
 
     report = EvalReport(metadata=metadata, results=results)
     write_json_report(report, args.output)
     write_markdown_report(report, args.markdown)
-    _print_summary(args, results)
+    comparison = _compare_with_previous(previous_json_path, report)
+    _print_summary(args, results, suite_start, comparison)
     return 0
 
 
@@ -158,27 +164,39 @@ def _print_case_start(
     total_runs: int,
     case,
     repeat_index: int,
+    suite_start: float,
 ) -> None:
     if args.quiet:
         return
+    elapsed, eta = _progress_timing(suite_start, run_index - 1, total_runs)
     _emit(
         f"[{run_index}/{total_runs}] {case.id} {case.name} "
-        f"({case.category}) repeat {repeat_index}/{args.repeat}"
+        f"({case.category}) repeat {repeat_index}/{args.repeat} "
+        f"elapsed={elapsed} eta={eta}"
     )
 
 
-def _print_case_result(args: argparse.Namespace, result: CaseRunResult) -> None:
+def _print_case_result(
+    args: argparse.Namespace,
+    result: CaseRunResult,
+    suite_start: float,
+    completed_runs: int,
+    total_runs: int,
+) -> None:
     if args.quiet:
         return
     validation = result.validation
     execution = result.execution
     status = "PASS" if result.passed else "FAIL"
     json_status = "ok" if validation.valid_json else "invalid"
+    elapsed, eta = _progress_timing(suite_start, completed_runs, total_runs)
     details = [
         f"  {status}",
         f"score={result.deterministic_score}",
         f"duration={execution.duration_seconds:.1f}s",
         f"json={json_status}",
+        f"elapsed={elapsed}",
+        f"eta={eta}",
     ]
     if validation.hard_failures:
         details.append(f"failures={','.join(validation.hard_failures)}")
@@ -192,7 +210,12 @@ def _print_case_result(args: argparse.Namespace, result: CaseRunResult) -> None:
     _emit("")
 
 
-def _print_summary(args: argparse.Namespace, results: list[CaseRunResult]) -> None:
+def _print_summary(
+    args: argparse.Namespace,
+    results: list[CaseRunResult],
+    suite_start: float,
+    comparison: list[str],
+) -> None:
     if args.quiet:
         return
     average = _average(result.deterministic_score for result in results)
@@ -202,8 +225,171 @@ def _print_summary(args: argparse.Namespace, results: list[CaseRunResult]) -> No
     _emit(f"  average score: {average:.1f}")
     _emit(f"  pass rate: {pass_rate:.1f}%")
     _emit(f"  JSON validity: {json_rate:.1f}%")
+    _emit(f"  elapsed: {_format_duration(time.monotonic() - suite_start)}")
     _emit(f"  wrote: {args.output}")
     _emit(f"  wrote: {args.markdown}")
+    _emit("")
+    _emit("Previous comparison")
+    for line in comparison:
+        _emit(f"  {line}")
+
+
+def _backup_previous_report(path: str | Path) -> Path:
+    report_path = Path(path)
+    previous_path = _previous_path(report_path)
+    if report_path.exists():
+        previous_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(report_path, previous_path)
+    return previous_path
+
+
+def _previous_path(path: Path) -> Path:
+    return path.with_name(f"previous{path.suffix}")
+
+
+def _compare_with_previous(previous_path: Path, report: EvalReport) -> list[str]:
+    if not previous_path.exists():
+        return ["previous report: none"]
+    try:
+        previous = json.loads(previous_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"previous report: unreadable ({exc})"]
+
+    current_results = report.results
+    previous_results = previous.get("results")
+    if not isinstance(previous_results, list):
+        return ["previous report: unreadable (missing results)"]
+
+    lines = [
+        f"runs: {len(current_results)} ({_signed_number(len(current_results) - len(previous_results))})",
+        _metric_delta(
+            "average score",
+            _average(result.deterministic_score for result in current_results),
+            _average(_score_from_plain(result) for result in previous_results),
+        ),
+        _metric_delta(
+            "pass rate",
+            _rate(result.passed for result in current_results),
+            _rate(bool(result.get("passed", False)) for result in previous_results),
+            suffix="%",
+        ),
+        _metric_delta(
+            "JSON validity",
+            _rate(result.validation.valid_json for result in current_results),
+            _rate(_valid_json_from_plain(result) for result in previous_results),
+            suffix="%",
+        ),
+    ]
+
+    previous_by_key = {_plain_result_key(result): result for result in previous_results}
+    current_by_key = {_result_key(result): result for result in current_results}
+    added = sorted(set(current_by_key) - set(previous_by_key))
+    removed = sorted(set(previous_by_key) - set(current_by_key))
+    changed = _changed_case_lines(previous_by_key, current_by_key)
+    lines.append(f"case runs added: {len(added)} removed: {len(removed)} changed: {len(changed)}")
+    lines.extend(changed)
+    return lines
+
+
+def _changed_case_lines(
+    previous_by_key: dict[tuple[str, int], dict[str, Any]],
+    current_by_key: dict[tuple[str, int], CaseRunResult],
+) -> list[str]:
+    lines: list[str] = []
+    for key in sorted(set(previous_by_key) & set(current_by_key)):
+        previous = previous_by_key[key]
+        current = current_by_key[key]
+        previous_score = _score_from_plain(previous)
+        current_score = current.deterministic_score
+        previous_passed = bool(previous.get("passed", False))
+        current_passed = current.passed
+        previous_failures = _hard_failures_from_plain(previous)
+        current_failures = current.validation.hard_failures
+        changes: list[str] = []
+        if current_score != previous_score:
+            changes.append(f"score {previous_score}->{current_score} ({_signed_number(current_score - previous_score)})")
+        if current_passed != previous_passed:
+            changes.append(
+                f"pass {'yes' if previous_passed else 'no'}->{'yes' if current_passed else 'no'}"
+            )
+        if current_failures != previous_failures:
+            before = ",".join(previous_failures) or "-"
+            after = ",".join(current_failures) or "-"
+            changes.append(f"failures {before}->{after}")
+        if changes:
+            case_id, repeat_index = key
+            lines.append(f"{case_id} repeat {repeat_index}: " + "; ".join(changes))
+    return lines
+
+
+def _result_key(result: CaseRunResult) -> tuple[str, int]:
+    return (result.case.id, result.repeat_index)
+
+
+def _plain_result_key(result: dict[str, Any]) -> tuple[str, int]:
+    case = result.get("case") if isinstance(result, dict) else {}
+    case_id = case.get("id", "unknown") if isinstance(case, dict) else "unknown"
+    return (str(case_id), int(result.get("repeat_index", 0)))
+
+
+def _score_from_plain(result: dict[str, Any]) -> int:
+    value = result.get("deterministic_score", 0)
+    return int(value) if isinstance(value, (int, float)) else 0
+
+
+def _valid_json_from_plain(result: dict[str, Any]) -> bool:
+    validation = result.get("validation")
+    if not isinstance(validation, dict):
+        return False
+    return bool(validation.get("valid_json", False))
+
+
+def _hard_failures_from_plain(result: dict[str, Any]) -> list[str]:
+    validation = result.get("validation")
+    if not isinstance(validation, dict):
+        return []
+    failures = validation.get("hard_failures")
+    if not isinstance(failures, list):
+        return []
+    return [str(failure) for failure in failures]
+
+
+def _metric_delta(label: str, current: float, previous: float, suffix: str = "") -> str:
+    delta = current - previous
+    return f"{label}: {current:.1f}{suffix} ({_signed_float(delta)}{suffix})"
+
+
+def _signed_number(value: int) -> str:
+    return f"{value:+d}"
+
+
+def _signed_float(value: float) -> str:
+    return f"{value:+.1f}"
+
+
+def _progress_timing(
+    suite_start: float,
+    completed_runs: int,
+    total_runs: int,
+) -> tuple[str, str]:
+    elapsed_seconds = max(0.0, time.monotonic() - suite_start)
+    elapsed = _format_duration(elapsed_seconds)
+    if completed_runs <= 0:
+        return elapsed, "unknown"
+    remaining_runs = max(0, total_runs - completed_runs)
+    eta_seconds = (elapsed_seconds / completed_runs) * remaining_runs
+    return elapsed, _format_duration(eta_seconds)
+
+
+def _format_duration(seconds: float) -> str:
+    total_seconds = max(0, int(round(seconds)))
+    if total_seconds < 60:
+        return f"{total_seconds}s"
+    minutes, seconds_part = divmod(total_seconds, 60)
+    if minutes < 60:
+        return f"{minutes}m {seconds_part:02d}s"
+    hours, minutes_part = divmod(minutes, 60)
+    return f"{hours}h {minutes_part:02d}m {seconds_part:02d}s"
 
 
 def _average(values) -> float:

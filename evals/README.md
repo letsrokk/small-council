@@ -47,9 +47,9 @@ The framework captures stdout, stderr, duration, exit code, parsed JSON, validat
 By default, `./eval` prints progress to stdout:
 
 - suite path, selected case count, repeat count, total runs, and report paths at startup
-- one line before each case run
-- one PASS/FAIL result line with score, duration, JSON status, and hard failures when present
-- a final summary with average score, pass rate, JSON validity, and written report paths
+- one line before each case run with elapsed time and ETA
+- one PASS/FAIL result line with score, duration, JSON status, elapsed time, ETA, and hard failures when present
+- a final summary with average score, pass rate, JSON validity, total elapsed time, written report paths, and comparison to the previous report when available
 
 Use `--quiet` for report-only execution with no progress output:
 
@@ -68,6 +68,28 @@ Verbosity levels:
 - default: concise progress and per-case PASS/FAIL lines
 - `--quiet`: no progress output; JSON and Markdown reports are still written
 - `--verbose`: default output plus failure diagnostics
+
+## Previous Report Comparison
+
+At startup, `./eval` backs up existing reports before writing the new run:
+
+- `evals/reports/latest.json` is copied to `evals/reports/previous.json`
+- `evals/reports/latest.md` is copied to `evals/reports/previous.md`
+
+When custom report paths are used, the backup files are siblings named
+`previous` with the same extension. For example:
+
+```bash
+./eval --output tmp/latest-smoke.json --markdown tmp/latest-smoke.md
+```
+
+backs up to `tmp/previous.json` and `tmp/previous.md` if those latest files
+already exist.
+
+After the new reports are written, the final summary compares the new JSON
+report against `previous.json`. It prints aggregate deltas for run count,
+average score, pass rate, and JSON validity, plus only changed per-case runs.
+If no previous JSON report exists, the summary says `previous report: none`.
 
 ## Scoring
 
