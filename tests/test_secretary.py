@@ -247,18 +247,5 @@ class SecretaryConfigTests(unittest.TestCase):
 
         self.assertTrue(secretary_config.immediate_updates)
 
-    def test_secretary_config_can_disable_immediate_updates(self) -> None:
-        args = argparse.Namespace(
-            secretary=None,
-            secretary_verbosity=None,
-            secretary_immediate_updates=False,
-        )
-        config = {"secretary": {}}
-
-        secretary_config = _secretary_config(config, args)
-
-        self.assertFalse(secretary_config.immediate_updates)
-
-
 if __name__ == "__main__":
     unittest.main()

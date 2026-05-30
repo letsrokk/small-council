@@ -221,7 +221,6 @@ The local Secretary remains available for deterministic/offline runs:
 ```bash
 ./council --secretary local "Where should I go for dinner?"
 ./council --secretary model --secretary-verbosity balanced "Where should I go for dinner?"
-./council --no-secretary-immediate-updates "Where should I go for dinner?"
 ```
 
 Supported model-backed verbosity levels are `low`, `balanced`, and `high`.

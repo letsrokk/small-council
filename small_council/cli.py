@@ -86,12 +86,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--set-runoff-rounds", type=_positive_int, metavar="N", help="Use N runoff rounds for tied decisions in this run.")
     parser.add_argument("--secretary", choices=("local", "model"), help="Use local or model-backed Secretary progress reports.")
     parser.add_argument("--secretary-verbosity", choices=("low", "balanced", "high"), help="Set model-backed Secretary verbosity for this run.")
-    parser.add_argument(
-        "--no-secretary-immediate-updates",
-        dest="secretary_immediate_updates",
-        action="store_false",
-        help="Disable the short immediate Secretary updates but keep milestone summaries.",
-    )
     parser.add_argument("--set-diversity", choices=("low", "balanced", "high"), help="Set proposal diversity mode for this run.")
     parser.add_argument("--plain-output", action="store_true", help="Force plain human-readable output.")
     parser.add_argument("--rich-output", action="store_true", help="Force Rich terminal output.")
@@ -273,13 +267,12 @@ def _secretary_config(config: dict, args: argparse.Namespace) -> SecretaryConfig
 
     provider = str(secretary_config.get("provider", "codex"))
     model = str(secretary_config.get("model", "gpt-5.4-mini"))
-    immediate_updates = getattr(args, "secretary_immediate_updates", True)
     return SecretaryConfig(
         mode=mode,
         provider=provider,
         model=model,
         verbosity=verbosity,
-        immediate_updates=immediate_updates,
+        immediate_updates=True,
     )
 
 
@@ -986,7 +979,7 @@ def _doctor_text(config: dict) -> str:
             }
         )
     lines.append(_format_table(["Provider", "Enabled", "Health", "Discovered", "Static", "Effective", "Errors"], rows))
-    secretary = _secretary_config(config, argparse.Namespace(secretary=None, secretary_verbosity=None, secretary_immediate_updates=True))
+    secretary = _secretary_config(config, argparse.Namespace(secretary=None, secretary_verbosity=None))
     lines.append("")
     lines.append(f"Secretary: {secretary.provider}/{secretary.model}")
     search_config = web_search_config(config)
@@ -1042,7 +1035,7 @@ def _models_text(config: dict) -> str:
             lines.append(_format_table(["Model", "Size", "Discovered", "Static", "Effective"], rows))
         else:
             lines.append("(no models)")
-    secretary = _secretary_config(config, argparse.Namespace(secretary=None, secretary_verbosity=None, secretary_immediate_updates=True))
+    secretary = _secretary_config(config, argparse.Namespace(secretary=None, secretary_verbosity=None))
     lines.append("")
     lines.append(f"Secretary: {secretary.provider}/{secretary.model}")
     pool = effective_model_pool(config)
