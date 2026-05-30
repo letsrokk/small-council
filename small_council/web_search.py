@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 import time
 import urllib.error
@@ -24,6 +25,7 @@ class SearchResult:
     snippet: str
     source: str
     score: float | None = None
+    raw: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {key: value for key, value in asdict(self).items() if value is not None}
@@ -33,12 +35,24 @@ class SearchResult:
 class SearchResponse:
     query: str
     results: list[SearchResult]
+    provider: str = ""
     error: str | None = None
     disabled: bool = False
+    fallback_provider: str | None = None
 
     @property
     def ok(self) -> bool:
         return self.error is None and not self.disabled
+
+
+@dataclass(frozen=True)
+class SearchFetchResponse:
+    url: str
+    title: str
+    content: str
+    links: list[str]
+    provider: str
+    raw: dict[str, Any] | None = None
 
 
 class SearchProvider(Protocol):
@@ -49,11 +63,27 @@ class SearchProvider(Protocol):
         query: str,
         max_results: int,
         engines: list[str] | None = None,
-    ) -> list[SearchResult]:
+    ) -> SearchResponse:
         ...
 
 
 class SearchError(RuntimeError):
+    pass
+
+
+class UnknownSearchProviderError(SearchError):
+    pass
+
+
+class SearchProviderUnavailableError(SearchError):
+    pass
+
+
+class SearchConfigurationError(SearchError):
+    pass
+
+
+class SearchAuthenticationError(SearchError):
     pass
 
 
@@ -75,53 +105,88 @@ class SearchServerError(SearchError):
 
 def web_search_config(config: dict[str, Any]) -> dict[str, Any]:
     raw = config.get("search")
-    legacy = config.get("webSearch")
     if not isinstance(raw, dict):
-        raw = legacy if isinstance(legacy, dict) else {}
+        raw = {}
+    searxng = raw.get("searxng") if isinstance(raw.get("searxng"), dict) else {}
+    ollama = raw.get("ollama") if isinstance(raw.get("ollama"), dict) else {}
 
-    engines = raw.get("defaultEngines", DEFAULT_SEARCH_ENGINES)
+    engines = searxng.get("defaultEngines", DEFAULT_SEARCH_ENGINES)
     if not isinstance(engines, list):
         engines = DEFAULT_SEARCH_ENGINES
     default_engines = [str(engine).strip() for engine in engines if str(engine).strip()]
+    searxng_base_url = searxng.get("baseUrl", "http://localhost:8080")
+    ollama_base_url = ollama.get("baseUrl", "https://ollama.com")
 
     return {
         "enabled": bool(raw.get("enabled", True)),
-        "provider": str(raw.get("provider", "searxng")),
-        "baseUrl": str(raw.get("baseUrl", "http://localhost:8080")),
+        "provider": str(raw.get("provider", "searxng")).strip().lower(),
+        "allowFallback": bool(raw.get("allowFallback", False)),
+        "fallbackProvider": str(raw.get("fallbackProvider", "searxng")).strip().lower(),
         "timeoutSeconds": float(raw.get("timeoutSeconds", 15)),
         "maxResults": int(raw.get("maxResults", 8)),
         "cacheTtlSeconds": float(raw.get("cacheTtlSeconds", 900)),
         "minDelaySeconds": float(raw.get("minDelaySeconds", 3)),
         "maxConcurrentRequests": int(raw.get("maxConcurrentRequests", 1)),
-        "defaultEngines": default_engines or DEFAULT_SEARCH_ENGINES[:],
+        "searxng": {
+            "baseUrl": str(searxng_base_url),
+            "defaultEngines": default_engines or DEFAULT_SEARCH_ENGINES[:],
+        },
+        "ollama": {
+            "baseUrl": str(ollama_base_url),
+            "apiKey": ollama.get("apiKey"),
+            "apiKeyEnv": str(ollama.get("apiKeyEnv", "OLLAMA_API_KEY")),
+            "searchEndpoint": str(ollama.get("searchEndpoint", "/api/web_search")),
+            "fetchEndpoint": str(ollama.get("fetchEndpoint", "/api/web_fetch")),
+        },
     }
 
 
-def create_search_provider(config: dict[str, Any]) -> SearchProvider | None:
+def create_search_provider(
+    config: dict[str, Any],
+    provider_name: str | None = None,
+) -> SearchProvider | None:
     search_config = web_search_config(config)
-    if search_config["provider"] == "searxng":
+    selected = str(provider_name or search_config["provider"]).strip().lower()
+    if selected == "searxng":
         return SearxngSearchProvider(search_config)
-    return None
+    if selected == "ollama":
+        return OllamaCloudSearchProvider(search_config)
+    raise UnknownSearchProviderError(f"Unknown search provider: {selected}")
 
 
 def create_search_worker(config: dict[str, Any]) -> SearchWorker | None:
     search_config = web_search_config(config)
-    provider = create_search_provider(config)
+    try:
+        provider = create_search_provider(config)
+    except SearchError:
+        return None
     if provider is None:
         return None
-    return SearchWorker(search_config, provider)
+    fallback_provider = None
+    if search_config.get("allowFallback"):
+        fallback_name = str(search_config.get("fallbackProvider", "")).strip().lower()
+        if fallback_name and fallback_name != provider.name:
+            try:
+                fallback_provider = create_search_provider(config, fallback_name)
+            except SearchError:
+                fallback_provider = None
+    return SearchWorker(search_config, provider, fallback_provider=fallback_provider)
 
 
 def search_enabled(config: dict[str, Any]) -> bool:
     search_config = web_search_config(config)
-    return bool(search_config.get("enabled")) and create_search_provider(config) is not None
+    try:
+        return bool(search_config.get("enabled")) and create_search_provider(config) is not None
+    except SearchError:
+        return False
 
 
 class SearxngSearchProvider:
     name = "searxng"
 
     def __init__(self, config: dict[str, Any]) -> None:
-        self.base_url = str(config.get("baseUrl", "http://localhost:8080")).rstrip("/")
+        provider_config = config.get("searxng") if isinstance(config.get("searxng"), dict) else {}
+        self.base_url = str(provider_config.get("baseUrl", "http://localhost:8080")).rstrip("/")
         self.timeout_seconds = float(config.get("timeoutSeconds", 15))
 
     def search(
@@ -129,7 +194,7 @@ class SearxngSearchProvider:
         query: str,
         max_results: int,
         engines: list[str] | None = None,
-    ) -> list[SearchResult]:
+    ) -> SearchResponse:
         params: dict[str, str] = {
             "q": query,
             "format": "json",
@@ -140,7 +205,11 @@ class SearxngSearchProvider:
         encoded = urllib.parse.urlencode(params)
         request = urllib.request.Request(
             f"{self.base_url}/search?{encoded}",
-            headers={"Accept": "application/json"},
+            headers={
+                "Accept": "application/json",
+                "X-Forwarded-For": "127.0.0.1",
+                "X-Real-IP": "127.0.0.1",
+            },
             method="GET",
         )
         try:
@@ -162,7 +231,124 @@ class SearxngSearchProvider:
             payload = json.loads(raw)
         except JSONDecodeError as exc:
             raise SearchParseError("SearXNG returned malformed JSON.") from exc
-        return parse_searxng_results(payload, max_results)
+        return SearchResponse(
+            query=query,
+            results=parse_searxng_results(payload, max_results),
+            provider=self.name,
+        )
+
+
+class OllamaCloudSearchProvider:
+    name = "ollama"
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        self.config = config
+        provider_config = config.get("ollama") if isinstance(config.get("ollama"), dict) else {}
+        self.base_url = str(provider_config.get("baseUrl", "https://ollama.com")).rstrip("/")
+        self.api_key = _configured_api_key(provider_config)
+        self.search_endpoint = _endpoint_path(provider_config.get("searchEndpoint", "/api/web_search"))
+        self.fetch_endpoint = _endpoint_path(provider_config.get("fetchEndpoint", "/api/web_fetch"))
+        self.timeout_seconds = float(config.get("timeoutSeconds", 15))
+
+    def search(
+        self,
+        query: str,
+        max_results: int,
+        engines: list[str] | None = None,
+    ) -> SearchResponse:
+        payload = self._request_json(
+            self.search_endpoint,
+            {"query": query, "max_results": max(0, min(10, int(max_results)))},
+        )
+        raw_results = payload.get("results", [])
+        if not isinstance(raw_results, list):
+            raise SearchParseError("Ollama web search returned malformed results.")
+        results: list[SearchResult] = []
+        for item in raw_results:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or "").strip()
+            url = str(item.get("url") or "").strip()
+            snippet = str(item.get("content") or item.get("snippet") or "").strip()
+            if not title and not url and not snippet:
+                continue
+            results.append(
+                SearchResult(
+                    title=title,
+                    url=url,
+                    snippet=snippet,
+                    source=self.name,
+                    raw=dict(item),
+                )
+            )
+            if len(results) >= max(0, int(max_results)):
+                break
+        return SearchResponse(query=query, results=results, provider=self.name)
+
+    def fetch(self, url: str, *, timeout: int | None = None) -> SearchFetchResponse:
+        payload = self._request_json(
+            self.fetch_endpoint,
+            {"url": url},
+            timeout_seconds=self.timeout_seconds if timeout is None else float(timeout),
+        )
+        links = payload.get("links", [])
+        if not isinstance(links, list):
+            links = []
+        return SearchFetchResponse(
+            url=url,
+            title=str(payload.get("title") or ""),
+            content=str(payload.get("content") or ""),
+            links=[str(link) for link in links],
+            provider=self.name,
+            raw=payload,
+        )
+
+    def _request_json(
+        self,
+        endpoint: str,
+        payload: dict[str, Any],
+        *,
+        timeout_seconds: float | None = None,
+    ) -> dict[str, Any]:
+        if not self.api_key:
+            raise SearchAuthenticationError(
+                "Ollama web search requires an API key. Set search.ollama.apiKey or OLLAMA_API_KEY."
+            )
+        request = urllib.request.Request(
+            self.base_url + endpoint,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=self.timeout_seconds if timeout_seconds is None else timeout_seconds,
+            ) as response:
+                raw = response.read().decode("utf-8")
+        except (TimeoutError, socket.timeout) as exc:
+            raise SearchTimeout("Ollama web search timed out.") from exc
+        except urllib.error.HTTPError as exc:
+            if exc.code in {401, 403}:
+                raise SearchAuthenticationError("Ollama web search authentication failed.") from exc
+            if exc.code == 429:
+                raise SearchRateLimitError("Ollama web search was rate-limited.") from exc
+            if 500 <= exc.code <= 599:
+                raise SearchServerError(f"Ollama web search returned HTTP {exc.code}.") from exc
+            raise SearchError(f"Ollama web search returned HTTP {exc.code}.") from exc
+        except OSError as exc:
+            raise SearchProviderUnavailableError(f"Ollama web search failed: {exc}") from exc
+        try:
+            decoded = json.loads(raw)
+        except JSONDecodeError as exc:
+            raise SearchParseError("Ollama web search returned malformed JSON.") from exc
+        if not isinstance(decoded, dict):
+            raise SearchParseError("Ollama web search returned a non-object response.")
+        return decoded
 
 
 class SearchWorker:
@@ -171,20 +357,28 @@ class SearchWorker:
         config: dict[str, Any],
         provider: SearchProvider,
         *,
+        fallback_provider: SearchProvider | None = None,
         monotonic=time.monotonic,
         sleep=asyncio.sleep,
     ) -> None:
         self.config = config
         self.provider = provider
+        self.fallback_provider = fallback_provider
         self.enabled = bool(config.get("enabled", True))
-        self.default_engines = _normalize_engines(config.get("defaultEngines"))
+        provider_config = config.get("searxng") if isinstance(config.get("searxng"), dict) else {}
+        self.searxng_default_engines = _normalize_engines(provider_config.get("defaultEngines"))
+        self.default_engines = (
+            self.searxng_default_engines
+            if provider.name == "searxng"
+            else []
+        )
         self.default_max_results = max(0, int(config.get("maxResults", 8)))
         self.cache_ttl_seconds = max(0.0, float(config.get("cacheTtlSeconds", 900)))
         self.min_delay_seconds = max(0.0, float(config.get("minDelaySeconds", 3)))
         max_concurrent = max(1, int(config.get("maxConcurrentRequests", 1)))
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._cache: dict[tuple[str, tuple[str, ...], int], tuple[float, list[SearchResult]]] = {}
-        self._in_flight: dict[tuple[str, tuple[str, ...], int], asyncio.Task[list[SearchResult]]] = {}
+        self._in_flight: dict[tuple[str, tuple[str, ...], int], asyncio.Task[SearchResponse]] = {}
         self._lock = asyncio.Lock()
         self._delay_lock = asyncio.Lock()
         self._last_outbound_at: float | None = None
@@ -201,10 +395,10 @@ class SearchWorker:
         query_text = str(query).strip()
         if not self.enabled:
             _record(events, status="disabled", query=query_text)
-            return SearchResponse(query=query_text, results=[], error="search unavailable: disabled", disabled=True)
+            return SearchResponse(query=query_text, results=[], provider=self.provider.name, error="search unavailable: disabled", disabled=True)
         if not query_text:
             _record(events, status="empty_query", query=query_text)
-            return SearchResponse(query=query_text, results=[])
+            return SearchResponse(query=query_text, results=[], provider=self.provider.name)
 
         selected_engines = _normalize_engines(engines) or self.default_engines
         selected_max = self.default_max_results if max_results is None else max(0, int(max_results))
@@ -212,7 +406,7 @@ class SearchWorker:
 
         cached = await self._cached(key, events, query_text)
         if cached is not None:
-            return SearchResponse(query=query_text, results=cached)
+            return SearchResponse(query=query_text, results=cached, provider=self.provider.name)
 
         async with self._lock:
             task = self._in_flight.get(key)
@@ -225,10 +419,10 @@ class SearchWorker:
                 self._in_flight[key] = task
         try:
             results = await task
-            return SearchResponse(query=query_text, results=results)
+            return results
         except Exception as exc:
             _record(events, status="failed", query=query_text, error=str(exc), errorType=type(exc).__name__)
-            return SearchResponse(query=query_text, results=[], error=f"search unavailable: {exc}")
+            return SearchResponse(query=query_text, results=[], provider=self.provider.name, error=f"search unavailable: {exc}")
         finally:
             async with self._lock:
                 if self._in_flight.get(key) is task:
@@ -263,10 +457,11 @@ class SearchWorker:
         engines: list[str],
         max_results: int,
         events: list[dict[str, Any]] | None,
-    ) -> list[SearchResult]:
+    ) -> SearchResponse:
         _record(events, status="concurrency_waiting", query=query)
         async with self._semaphore:
             _record(events, status="concurrency_acquired", query=query)
+            started_at = self._monotonic()
             try:
                 await self._wait_for_min_delay(events, query)
                 _record(
@@ -277,29 +472,72 @@ class SearchWorker:
                     engines=engines,
                     maxResults=max_results,
                 )
-                results = await asyncio.to_thread(
-                    self.provider.search, query, max_results, engines
-                )
-                _record(events, status="ok", query=query, results=len(results))
-                await self._store_cache(query, engines, max_results, results)
-                return results
-            except SearchTimeout:
+                response = await self._call_provider(self.provider, query, max_results, engines)
+                duration = self._monotonic() - started_at
+                _record(events, status="ok", query=query, provider=response.provider, results=len(response.results), durationSeconds=duration)
+                await self._store_cache(query, engines, max_results, response.results)
+                return response
+            except SearchTimeout as exc:
                 _record(events, status="timeout", query=query)
-                raise
-            except SearchParseError:
+                return await self._fallback_or_raise(query, engines, max_results, events, exc)
+            except SearchParseError as exc:
                 _record(events, status="malformed_json", query=query)
-                raise
-            except SearchRateLimitError:
+                return await self._fallback_or_raise(query, engines, max_results, events, exc)
+            except SearchRateLimitError as exc:
                 _record(events, status="http_429", query=query)
-                raise
+                return await self._fallback_or_raise(query, engines, max_results, events, exc)
             except SearchServerError as exc:
                 _record(events, status="http_5xx", query=query, error=str(exc))
-                raise
+                return await self._fallback_or_raise(query, engines, max_results, events, exc)
             except SearchError as exc:
                 _record(events, status="network_failure", query=query, error=str(exc))
-                raise
+                return await self._fallback_or_raise(query, engines, max_results, events, exc)
             finally:
                 _record(events, status="concurrency_released", query=query)
+
+    async def _call_provider(
+        self,
+        provider: SearchProvider,
+        query: str,
+        max_results: int,
+        engines: list[str],
+    ) -> SearchResponse:
+        return await asyncio.to_thread(provider.search, query, max_results, engines)
+
+    async def _fallback_or_raise(
+        self,
+        query: str,
+        engines: list[str],
+        max_results: int,
+        events: list[dict[str, Any]] | None,
+        exc: SearchError,
+    ) -> SearchResponse:
+        if self.fallback_provider is None:
+            raise exc
+        fallback_engines = (
+            self.searxng_default_engines
+            if not engines and self.fallback_provider.name == "searxng"
+            else engines
+        )
+        _record(
+            events,
+            status="fallback",
+            query=query,
+            provider=self.provider.name,
+            fallbackProvider=self.fallback_provider.name,
+        )
+        response = await self._call_provider(self.fallback_provider, query, max_results, fallback_engines)
+        response = SearchResponse(
+            query=response.query,
+            results=response.results,
+            provider=self.provider.name,
+            error=response.error,
+            disabled=response.disabled,
+            fallback_provider=response.provider,
+        )
+        _record(events, status="fallback_ok", query=query, fallbackProvider=response.fallback_provider, results=len(response.results))
+        await self._store_cache(query, engines, max_results, response.results)
+        return response
 
     async def _wait_for_min_delay(
         self, events: list[dict[str, Any]] | None, query: str
@@ -440,6 +678,21 @@ def _score_for_result(item: dict[str, Any]) -> float | None:
         except ValueError:
             return None
     return None
+
+
+def _configured_api_key(config: dict[str, Any]) -> str:
+    explicit = config.get("apiKey")
+    if explicit:
+        return str(explicit)
+    env_name = str(config.get("apiKeyEnv") or "OLLAMA_API_KEY").strip()
+    return os.environ.get(env_name, "").strip() if env_name else ""
+
+
+def _endpoint_path(value: Any) -> str:
+    path = str(value or "").strip()
+    if not path:
+        raise SearchConfigurationError("Ollama endpoint path must not be empty.")
+    return path if path.startswith("/") else f"/{path}"
 
 
 def _record(events: list[dict[str, Any]] | None, **payload: Any) -> None:

@@ -64,7 +64,13 @@ from .state import (
     update_after_decision,
     write_agent_files,
 )
-from .web_search import create_search_provider, create_search_worker, search_enabled, web_search_config
+from .web_search import (
+    SearchError,
+    create_search_provider,
+    create_search_worker,
+    search_enabled,
+    web_search_config,
+)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -984,13 +990,19 @@ def _doctor_text(config: dict) -> str:
     lines.append("")
     lines.append(f"Secretary: {secretary.provider}/{secretary.model}")
     search_config = web_search_config(config)
-    search_provider = create_search_provider(config)
+    try:
+        search_provider = create_search_provider(config)
+        search_status = "configured" if search_provider else "unavailable"
+    except SearchError as exc:
+        search_provider = None
+        search_status = f"unavailable ({exc})"
     lines.append(
         "Web search: "
         f"{'enabled' if search_enabled(config) else 'disabled'} "
         f"provider={search_config['provider']} "
-        f"baseUrl={search_config['baseUrl']} "
-        f"status={'configured' if search_provider else 'unavailable'}"
+        f"baseUrl={_search_provider_base_url(search_config)} "
+        f"fallback={'enabled' if search_config.get('allowFallback') else 'disabled'} "
+        f"status={search_status}"
     )
     if not effective_model_pool(config):
         lines.append("Validation: no enabled models are available.")
@@ -1067,18 +1079,20 @@ def _apply_config_sets(config: dict, assignments: list[str]) -> dict:
 
 
 def _validate_set_value(key: str, value) -> None:
+    if key.startswith("webSearch.") or key in {"search.baseUrl", "search.defaultEngines"}:
+        raise ValueError(
+            f"{key} is no longer supported; use provider-specific search settings."
+        )
     if key.endswith(".enabled") or key.endswith(".discover_models") or key.endswith(".allow_unknown_size_models"):
         if not isinstance(value, bool):
             raise ValueError(f"{key} must be true or false.")
-    if key in {"search.enabled", "webSearch.enabled"} and not isinstance(value, bool):
+    if key == "search.enabled" and not isinstance(value, bool):
         raise ValueError(f"{key} must be true or false.")
     if key in {
         "search.timeoutSeconds",
         "search.maxResults",
         "search.minDelaySeconds",
         "search.maxConcurrentRequests",
-        "webSearch.timeoutSeconds",
-        "webSearch.maxResults",
     }:
         if not isinstance(value, (int, float)) or value <= 0:
             raise ValueError(f"{key} must be a positive number.")
@@ -1086,11 +1100,37 @@ def _validate_set_value(key: str, value) -> None:
         not isinstance(value, (int, float)) or value < 0
     ):
         raise ValueError("search.cacheTtlSeconds must be zero or a positive number.")
+    if key in {"search.provider", "search.fallbackProvider"} and str(value).strip().lower() not in {"searxng", "ollama"}:
+        raise ValueError(f"{key} must be searxng or ollama.")
+    if key == "search.allowFallback" and not isinstance(value, bool):
+        raise ValueError("search.allowFallback must be true or false.")
+    if key in {
+        "search.ollama.baseUrl",
+        "search.ollama.apiKeyEnv",
+        "search.ollama.searchEndpoint",
+        "search.ollama.fetchEndpoint",
+        "search.searxng.baseUrl",
+    }:
+        if not str(value).strip():
+            raise ValueError(f"{key} must not be empty.")
+    if key == "search.searxng.defaultEngines" and not isinstance(value, list):
+        raise ValueError("search.searxng.defaultEngines must be a list.")
     if key.endswith(".max_parameters") and value is not None and parse_parameter_limit(value) is None:
         raise ValueError(f"{key} must be a size like 12b or null.")
     if key == "secretary.provider":
         if not str(value).strip():
             raise ValueError("secretary.provider must not be empty.")
+
+
+def _search_provider_base_url(search_config: dict) -> str:
+    if search_config.get("provider") == "ollama":
+        provider_config = search_config.get("ollama") or {}
+        if isinstance(provider_config, dict):
+            return str(provider_config.get("baseUrl", ""))
+    provider_config = search_config.get("searxng") or {}
+    if isinstance(provider_config, dict):
+        return str(provider_config.get("baseUrl", ""))
+    return ""
 
 
 def _validate_secretary_config(config: dict, secretary: SecretaryConfig) -> None:

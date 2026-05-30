@@ -111,9 +111,13 @@ List what the app sees:
 ./council --doctor
 ```
 
-## Web Search With SearXNG
+## Web Search
 
-Small Council members use one shared Search Worker during independent research for current or external information. The worker centralizes SearXNG access, applies caching, joins duplicate in-flight queries, and rate-limits outbound requests so concurrent members do not hammer SearXNG or upstream search engines.
+Small Council members use one shared Search Worker during independent research for current or external information. The worker centralizes provider access, applies caching, joins duplicate in-flight queries, and rate-limits outbound requests so concurrent members do not hammer search providers or upstream search engines.
+
+Search is only used during the council's initial research phase. Later discussion, voting, runoff, and summary phases do not perform web searches.
+
+SearXNG is the default provider. Common worker settings live directly under `search`; provider-specific settings live under each provider key.
 
 Host-local SearXNG:
 
@@ -121,18 +125,21 @@ Host-local SearXNG:
 search:
   enabled: true
   provider: searxng
-  baseUrl: http://localhost:8080
+  allowFallback: false
+  fallbackProvider: searxng
   timeoutSeconds: 15
   maxResults: 8
   cacheTtlSeconds: 900
   minDelaySeconds: 3
   maxConcurrentRequests: 1
-  defaultEngines:
-    - bing
-    - wikipedia
-    - wikidata
-    - github
-    - stackoverflow
+  searxng:
+    baseUrl: http://localhost:8080
+    defaultEngines:
+      - bing
+      - wikipedia
+      - wikidata
+      - github
+      - stackoverflow
 ```
 
 When running the app inside Docker Compose with a `searxng` service on the same network, use:
@@ -141,23 +148,51 @@ When running the app inside Docker Compose with a `searxng` service on the same 
 search:
   enabled: true
   provider: searxng
-  baseUrl: http://searxng:8080
   timeoutSeconds: 15
   maxResults: 8
   cacheTtlSeconds: 900
   minDelaySeconds: 3
   maxConcurrentRequests: 1
-  defaultEngines:
-    - bing
-    - wikipedia
-    - wikidata
-    - github
-    - stackoverflow
+  searxng:
+    baseUrl: http://searxng:8080
+    defaultEngines:
+      - bing
+      - wikipedia
+      - wikidata
+      - github
+      - stackoverflow
 ```
 
 SearXNG requests use `/search?q=<query>&format=json` with optional comma-separated `engines`. During research, a member can request searches such as `latest movies streaming this week`, receive compact title/URL/snippet/source results, and use that context in its recommendation. Use `--no-search` to disable web search for a single run.
 
-The default engine list is tuned for local agent use: `bing`, `wikipedia`, `wikidata`, `github`, and `stackoverflow`. This avoids the most fragile scraping engines by default and reduces Brave, DuckDuckGo, and Startpage rate-limit issues. Startpage, DuckDuckGo, Google, and Brave scraping engines may still rate-limit or CAPTCHA under agentic workloads if you enable them.
+`search.searxng.defaultEngines` is tuned for local agent use: `bing`, `wikipedia`, `wikidata`, `github`, and `stackoverflow`. This avoids the most fragile scraping engines by default and reduces Brave, DuckDuckGo, and Startpage rate-limit issues. Startpage, DuckDuckGo, Google, and Brave scraping engines may still rate-limit or CAPTCHA under agentic workloads if you enable them.
+
+Ollama Cloud/direct API web search is also supported. It calls Ollama's real web search and fetch APIs; it does not ask a model to invent or summarize search results from memory.
+
+```bash
+export OLLAMA_API_KEY="your-key"
+./council --set search.provider=ollama
+./council --set search.ollama.baseUrl=https://ollama.com
+./council --set search.ollama.apiKeyEnv=OLLAMA_API_KEY
+```
+
+Equivalent YAML:
+
+```yaml
+search:
+  enabled: true
+  provider: ollama
+  timeoutSeconds: 15
+  maxResults: 8
+  ollama:
+    baseUrl: https://ollama.com
+    apiKeyEnv: OLLAMA_API_KEY
+    apiKey: null
+    searchEndpoint: /api/web_search
+    fetchEndpoint: /api/web_fetch
+```
+
+`apiKeyEnv` is preferred so secrets stay outside `config/council.yaml`. If `apiKey` is set, it is used directly.
 
 ## Output And Progress
 

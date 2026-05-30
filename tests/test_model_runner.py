@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 from small_council import model_runner
 from small_council.state import Member
-from small_council.web_search import SearchResult, SearchWorker
+from small_council.web_search import SearchResponse, SearchResult, SearchWorker
 
 
 def _config(enabled: bool = True) -> dict:
@@ -17,13 +17,15 @@ def _config(enabled: bool = True) -> dict:
         "search": {
             "enabled": enabled,
             "provider": "searxng",
-            "baseUrl": "http://localhost:8080",
             "timeoutSeconds": 1,
             "maxResults": 2,
             "cacheTtlSeconds": 0,
             "minDelaySeconds": 0,
             "maxConcurrentRequests": 1,
-            "defaultEngines": ["bing"],
+            "searxng": {
+                "baseUrl": "http://localhost:8080",
+                "defaultEngines": ["bing"],
+            },
         },
     }
 
@@ -37,13 +39,13 @@ class FakeSearchProvider:
 
     def search(
         self, query: str, max_results: int, engines: list[str] | None = None
-    ) -> list[SearchResult]:
+    ) -> SearchResponse:
         self.queries.append(query)
         if self.delay:
             import time
 
             time.sleep(self.delay)
-        return [
+        results = [
             SearchResult(
                 title="Result",
                 url="https://example.com",
@@ -51,6 +53,7 @@ class FakeSearchProvider:
                 source="engine",
             )
         ]
+        return SearchResponse(query=query, results=results[:max_results], provider=self.name)
 
 
 class ModelRunnerSearchTests(unittest.IsolatedAsyncioTestCase):
