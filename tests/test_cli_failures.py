@@ -226,9 +226,9 @@ class CliMainFailureMessageTests(unittest.TestCase):
             "council": {
                 "discussion_rounds": 2,
                 "runoff_rounds": 3,
-                "secretary": {},
                 "diversity_mode": "balanced",
             },
+            "secretary": {},
         }
         failure = CodexUsageLimitError(
             "Codex usage limit reached while running Aurelia in research.",

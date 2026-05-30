@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Any
 
 from .config import ROOT, resolve_project_path
+from .model_providers import (
+    ModelInfo,
+    codex_catalog_models,
+    effective_models_for_provider,
+    provider_config,
+)
 from .state import Member
 
 
@@ -76,6 +82,41 @@ def codex_doctor(config: dict[str, Any] | None = None) -> str:
         env=_codex_env(config),
     )
     return (result.stdout + result.stderr).strip()
+
+
+class CodexProvider:
+    name = "codex"
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        self.config = config
+        self.provider_config = provider_config(config, self.name)
+
+    def discover_models(self) -> list[ModelInfo]:
+        return codex_catalog_models(self.config)
+
+    def validate_model(self, model: str) -> bool:
+        return any(item.model == model for item in list_codex_models(self.config))
+
+    async def run(
+        self,
+        member: Member,
+        prompt: str,
+        schema_path: Path,
+        phase: str,
+        web_search: bool = False,
+    ) -> CodexResult:
+        return await run_member(self.config, member, prompt, schema_path, phase, web_search)
+
+
+def list_codex_models(config: dict[str, Any]) -> list[ModelInfo]:
+    provider = CodexProvider(config)
+    if not provider.provider_config.get("enabled", False):
+        return []
+    try:
+        discovered = provider.discover_models() if provider.provider_config.get("discover_models", True) else []
+    except Exception:
+        discovered = []
+    return effective_models_for_provider("codex", config, discovered)
 
 
 async def run_member(
@@ -173,6 +214,7 @@ async def run_secretary_model(
 ) -> dict[str, Any]:
     secretary = Member(
         name="Secretary",
+        provider="codex",
         model=model,
         personality="non-voting progress reporter",
         is_president=False,

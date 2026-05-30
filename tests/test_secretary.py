@@ -216,7 +216,7 @@ class SecretaryConfigTests(unittest.TestCase):
             secretary=None,
             secretary_verbosity=None,
         )
-        config = {"council": {"secretary": {"model": "gpt-5.4-mini"}}}
+        config = {"secretary": {"model": "gpt-5.4-mini"}}
 
         secretary_config = _secretary_config(config, args)
 
@@ -229,7 +229,7 @@ class SecretaryConfigTests(unittest.TestCase):
             secretary="local",
             secretary_verbosity="high",
         )
-        config = {"council": {"secretary": {}}}
+        config = {"secretary": {}}
 
         secretary_config = _secretary_config(config, args)
 
@@ -241,7 +241,7 @@ class SecretaryConfigTests(unittest.TestCase):
             secretary=None,
             secretary_verbosity=None,
         )
-        config = {"council": {"secretary": {}}}
+        config = {"secretary": {}}
 
         secretary_config = _secretary_config(config, args)
 
@@ -253,7 +253,7 @@ class SecretaryConfigTests(unittest.TestCase):
             secretary_verbosity=None,
             secretary_immediate_updates=False,
         )
-        config = {"council": {"secretary": {}}}
+        config = {"secretary": {}}
 
         secretary_config = _secretary_config(config, args)
 

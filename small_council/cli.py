@@ -9,10 +9,16 @@ from .codex_runner import (
     CodexRunError,
     CodexUnavailable,
     CodexUsageLimitError,
-    codex_doctor,
-    run_member,
 )
-from .config import ROOT, load_config, read_json, resolve_project_path
+from .config import (
+    ROOT,
+    _parse_scalar,
+    load_config,
+    read_json,
+    resolve_project_path,
+    save_config,
+    set_config_value,
+)
 from .decision import (
     canonical_recommendations,
     canonicalize_vote,
@@ -26,6 +32,12 @@ from .decision import (
 )
 from .formatting import render_fallback
 from .memory import append_decision_memory, load_recent_memory
+from .model_providers import (
+    effective_model_pool,
+    parse_parameter_limit,
+    provider_report,
+)
+from .model_runner import run_member
 from .output import (
     BaseRenderer,
     RunContext,
@@ -78,19 +90,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rich-output", action="store_true", help="Force Rich terminal output.")
     parser.add_argument("--json-output", action="store_true", help="Print the final decision payload as JSON.")
     parser.add_argument("--no-search", action="store_true", help="Disable Codex web search during independent research.")
-    parser.add_argument("--doctor", action="store_true", help="Check local Codex CLI availability.")
+    parser.add_argument("--doctor", action="store_true", help="Check configured model providers.")
+    parser.add_argument("--models", action="store_true", help="List discovered, static, and effective models.")
+    parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="Persist a config value.")
     args = parser.parse_args(argv)
 
     config = load_config()
     _ensure_dirs(config)
     renderer = None
 
-    if args.doctor:
+    if args.set:
         try:
-            print(codex_doctor(config))
-        except CodexUnavailable as exc:
-            print(str(exc), file=sys.stderr)
-            return 2
+            config = _apply_config_sets(config, args.set)
+            save_config(config)
+        except ValueError as exc:
+            parser.error(str(exc))
+        return 0
+
+    if args.doctor:
+        print(_doctor_text(config))
+        return 0
+
+    if args.models:
+        print(_models_text(config))
         return 0
 
     try:
@@ -137,6 +159,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         secretary_config = _secretary_config(config, args)
+        _validate_secretary_config(config, secretary_config)
         if renderer:
             renderer.start_run(
                 RunContext(
@@ -232,20 +255,21 @@ def _runoff_rounds(config: dict, args: argparse.Namespace) -> int:
 
 
 def _secretary_config(config: dict, args: argparse.Namespace) -> SecretaryConfig:
-    council_config = config.get("council", {})
-    secretary_config = council_config.get("secretary", {})
+    secretary_config = config.get("secretary", {})
     mode = args.secretary or str(secretary_config.get("mode", "model"))
     if mode not in {"local", "model"}:
-        raise ValueError(f"Invalid council.secretary.mode: {mode}")
+        raise ValueError(f"Invalid secretary.mode: {mode}")
 
     verbosity = args.secretary_verbosity or str(secretary_config.get("verbosity", "balanced"))
     if verbosity not in {"low", "balanced", "high"}:
-        raise ValueError(f"Invalid council.secretary.verbosity: {verbosity}")
+        raise ValueError(f"Invalid secretary.verbosity: {verbosity}")
 
+    provider = str(secretary_config.get("provider", "codex"))
     model = str(secretary_config.get("model", "gpt-5.4-mini"))
     immediate_updates = getattr(args, "secretary_immediate_updates", True)
     return SecretaryConfig(
         mode=mode,
+        provider=provider,
         model=model,
         verbosity=verbosity,
         immediate_updates=immediate_updates,
@@ -779,10 +803,13 @@ async def _run_member_with_retries(
                 member.name, phase, exc.message, False, attempt, max_attempts
             )
             raise
-        except CodexRunError as exc:
-            retryable = exc.retryable and attempt < max_attempts
+        except Exception as exc:
+            if not hasattr(exc, "retryable"):
+                raise
+            message = getattr(exc, "message", str(exc))
+            retryable = bool(getattr(exc, "retryable", True)) and attempt < max_attempts
             secretary.agent_run_failed(
-                member.name, phase, exc.message, retryable, attempt, max_attempts
+                member.name, phase, message, retryable, attempt, max_attempts
             )
             if not retryable:
                 raise
@@ -928,3 +955,119 @@ def _format_table(
     separator = "-+-".join("-" * widths[header] for header in headers)
     body = [render_row(row) for row in rendered_rows]
     return "\n".join([header_row, separator, *body])
+
+
+def _doctor_text(config: dict) -> str:
+    rows = []
+    lines = ["Model Provider Doctor"]
+    for report in provider_report(config):
+        rows.append(
+            {
+                "Provider": report.provider,
+                "Enabled": "yes" if report.enabled else "no",
+                "Health": report.health,
+                "Discovered": len(report.discovered_models),
+                "Static": len(report.static_models),
+                "Effective": len(report.effective_models),
+                "Errors": "; ".join(report.errors),
+            }
+        )
+    lines.append(_format_table(["Provider", "Enabled", "Health", "Discovered", "Static", "Effective", "Errors"], rows))
+    secretary = _secretary_config(config, argparse.Namespace(secretary=None, secretary_verbosity=None, secretary_immediate_updates=True))
+    lines.append("")
+    lines.append(f"Secretary: {secretary.provider}/{secretary.model}")
+    if not effective_model_pool(config):
+        lines.append("Validation: no enabled models are available.")
+    try:
+        _validate_secretary_config(config, secretary)
+    except ValueError as exc:
+        lines.append(f"Validation: {exc}")
+    return "\n".join(lines)
+
+
+def _models_text(config: dict) -> str:
+    lines = ["Models"]
+    for report in provider_report(config):
+        lines.append("")
+        lines.append(f"[{report.provider}] enabled={'yes' if report.enabled else 'no'} health={report.health}")
+        rows = []
+        all_names = {
+            item.model
+            for item in [
+                *report.discovered_models,
+                *report.static_models,
+                *report.effective_models,
+            ]
+        }
+        for name in sorted(all_names):
+            info = _model_for_name(name, [*report.discovered_models, *report.static_models, *report.effective_models])
+            rows.append(
+                {
+                    "Model": name,
+                    "Size": _format_size(info.parameter_count_billion if info else None),
+                    "Discovered": "yes" if any(item.model == name for item in report.discovered_models) else "no",
+                    "Static": "yes" if any(item.model == name for item in report.static_models) else "no",
+                    "Effective": "yes" if any(item.model == name for item in report.effective_models) else "no",
+                }
+            )
+        if rows:
+            lines.append(_format_table(["Model", "Size", "Discovered", "Static", "Effective"], rows))
+        else:
+            lines.append("(no models)")
+    secretary = _secretary_config(config, argparse.Namespace(secretary=None, secretary_verbosity=None, secretary_immediate_updates=True))
+    lines.append("")
+    lines.append(f"Secretary: {secretary.provider}/{secretary.model}")
+    pool = effective_model_pool(config)
+    lines.append("Assignment pool: " + ", ".join(f"{item.provider}/{item.model}" for item in pool))
+    return "\n".join(lines)
+
+
+def _model_for_name(name: str, models) -> object | None:
+    for model in models:
+        if model.model == name and model.parameter_count_billion is not None:
+            return model
+    for model in models:
+        if model.model == name:
+            return model
+    return None
+
+
+def _format_size(value: float | None) -> str:
+    if value is None:
+        return "unknown"
+    return f"{value:g}b"
+
+
+def _apply_config_sets(config: dict, assignments: list[str]) -> dict:
+    updated = config
+    for assignment in assignments:
+        if "=" not in assignment:
+            raise ValueError("--set expects KEY=VALUE")
+        key, raw_value = assignment.split("=", 1)
+        value = _parse_scalar(raw_value)
+        _validate_set_value(key, value)
+        updated = set_config_value(updated, key, value)
+    return updated
+
+
+def _validate_set_value(key: str, value) -> None:
+    if key.endswith(".enabled") or key.endswith(".discover_models") or key.endswith(".allow_unknown_size_models"):
+        if not isinstance(value, bool):
+            raise ValueError(f"{key} must be true or false.")
+    if key.endswith(".max_parameters") and value is not None and parse_parameter_limit(value) is None:
+        raise ValueError(f"{key} must be a size like 12b or null.")
+    if key == "secretary.provider":
+        if not str(value).strip():
+            raise ValueError("secretary.provider must not be empty.")
+
+
+def _validate_secretary_config(config: dict, secretary: SecretaryConfig) -> None:
+    if secretary.mode != "model":
+        return
+    if not any(
+        item.provider == secretary.provider and item.model == secretary.model
+        for item in effective_model_pool(config)
+    ):
+        raise ValueError(
+            f"Secretary model {secretary.provider}/{secretary.model} is outside the effective model pool."
+        )

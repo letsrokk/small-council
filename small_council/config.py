@@ -20,6 +20,26 @@ def load_config(path: Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
     return _parse_simple_yaml(path.read_text(encoding="utf-8"))
 
 
+def save_config(config: dict[str, Any], path: Path = DEFAULT_CONFIG_PATH) -> None:
+    path.write_text(_dump_simple_yaml(config), encoding="utf-8")
+
+
+def set_config_value(config: dict[str, Any], dotted_key: str, value: Any) -> dict[str, Any]:
+    if not dotted_key or any(not part for part in dotted_key.split(".")):
+        raise ValueError(f"Invalid config key: {dotted_key}")
+    updated = dict(config)
+    cursor: dict[str, Any] = updated
+    parts = dotted_key.split(".")
+    for part in parts[:-1]:
+        current = cursor.get(part)
+        if not isinstance(current, dict):
+            current = {}
+            cursor[part] = current
+        cursor = current
+    cursor[parts[-1]] = value
+    return updated
+
+
 def resolve_project_path(value: str | Path) -> Path:
     path = Path(value)
     if path.is_absolute():
@@ -44,7 +64,46 @@ def _parse_scalar(raw: str) -> Any:
     try:
         return float(value)
     except ValueError:
-        return value
+            return value
+
+
+def _dump_simple_yaml(config: dict[str, Any]) -> str:
+    lines: list[str] = []
+    _dump_mapping(config, lines, 0)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _dump_mapping(mapping: dict[str, Any], lines: list[str], indent: int) -> None:
+    pad = " " * indent
+    for key, value in mapping.items():
+        if isinstance(value, dict):
+            lines.append(f"{pad}{key}:")
+            if value:
+                _dump_mapping(value, lines, indent + 2)
+            continue
+        if isinstance(value, list):
+            lines.append(f"{pad}{key}:")
+            for item in value:
+                lines.append(f"{pad}  - {_format_scalar(item)}")
+            continue
+        lines.append(f"{pad}{key}: {_format_scalar(value)}")
+
+
+def _format_scalar(value: Any) -> str:
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if value is None:
+        return "null"
+    if isinstance(value, (int, float)):
+        return str(value)
+    text = str(value)
+    if not text or text.strip() != text or text in {"true", "false", "null", "None", "~"}:
+        return json.dumps(text)
+    if any(char in text for char in [": ", "#", "[", "]", "{", "}", ","]):
+        return json.dumps(text)
+    return text
 
 
 def _parse_simple_yaml(text: str) -> dict[str, Any]:

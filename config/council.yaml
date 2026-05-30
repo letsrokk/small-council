@@ -3,10 +3,6 @@ council:
   discussion_rounds: 2
   runoff_rounds: 3
   diversity_mode: balanced
-  secretary:
-    mode: model
-    model: gpt-5.4-mini
-    verbosity: balanced
   member_names:
     - Aurelia
     - Bram
@@ -36,11 +32,38 @@ council:
     - Yara
     - Zeno
 
-model_pool:
-  - gpt-5.5
-  - gpt-5.4
-  - gpt-5.3-codex
-  - gpt-5.4-mini
+model_providers:
+  codex:
+    enabled: false
+    discover_models: false
+    enabled_models:
+    disabled_models:
+    static_models:
+      - gpt-5.5
+      - gpt-5.4
+      - gpt-5.4-mini
+      - gpt-5.3-codex
+      - gpt-5.2
+    max_parameters: null
+    allow_unknown_size_models: true
+  ollama:
+    enabled: true
+    discover_models: true
+    base_url: http://localhost:11434
+    enabled_models:
+    disabled_models:
+    static_models:
+      - deepseek-r1:7b
+      - qwen3:4b
+      - mistral:7b
+      - gemma3:4b
+      - llama3.2:3b
+    max_parameters: 8b
+    allow_unknown_size_models: false
+    request_timeout_seconds: 300
+    options:
+      temperature: null
+      num_ctx: null
 
 model_assignment:
   mode: random_on_creation
@@ -49,6 +72,12 @@ model_assignment:
   allow_duplicates_when_needed: true
 
 model_overrides:
+
+secretary:
+  mode: model
+  provider: ollama
+  model: qwen3:4b
+  verbosity: balanced
 
 personality_assignment:
   mode: random_on_creation

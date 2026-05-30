@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import inspect
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -11,12 +12,13 @@ from .output import BaseRenderer
 from .prompts import secretary_report_prompt
 
 
-ModelReporter = Callable[[dict[str, Any], str, str, Path, str], Awaitable[dict[str, Any]]]
+ModelReporter = Callable[[dict[str, Any], str, str, str, Path, str], Awaitable[dict[str, Any]]]
 
 
 @dataclass(frozen=True)
 class SecretaryConfig:
     mode: str = "model"
+    provider: str = "codex"
     model: str = "gpt-5.4-mini"
     verbosity: str = "balanced"
     immediate_updates: bool = True
@@ -334,6 +336,7 @@ class ModelBackedSecretary(LocalSecretary):
     def __init__(
         self,
         config: dict[str, Any],
+        provider: str,
         model: str,
         verbosity: str,
         stream: TextIO | None = None,
@@ -341,8 +344,20 @@ class ModelBackedSecretary(LocalSecretary):
         immediate_updates: bool = True,
         renderer: BaseRenderer | None = None,
     ) -> None:
+        if not isinstance(verbosity, str):
+            old_model = provider
+            old_verbosity = model
+            old_stream = verbosity
+            old_reporter = stream
+            provider = "codex"
+            model = old_model
+            verbosity = old_verbosity
+            stream = old_stream
+            if model_reporter is None:
+                model_reporter = old_reporter  # type: ignore[assignment]
         super().__init__(stream, immediate_updates=immediate_updates, renderer=renderer)
         self.config = config
+        self.provider = provider
         self.model = model
         self.verbosity = verbosity
         self.model_reporter = model_reporter or _default_model_reporter
@@ -353,18 +368,20 @@ class ModelBackedSecretary(LocalSecretary):
         if self._fallback_to_local:
             return await super()._emit_report()
         try:
-            payload = await self.model_reporter(
-                self.config,
-                self.model,
-                secretary_report_prompt(
-                    self.state.question if self.state else "",
-                    self._snapshot(),
-                    self.verbosity,
-                    self._milestone,
-                ),
-                ROOT / "schemas" / "secretary-report.schema.json",
-                f"secretary-{_phase_slug(self._milestone)}",
+            prompt = secretary_report_prompt(
+                self.state.question if self.state else "",
+                self._snapshot(),
+                self.verbosity,
+                self._milestone,
             )
+            schema = ROOT / "schemas" / "secretary-report.schema.json"
+            phase = f"secretary-{_phase_slug(self._milestone)}"
+            if _accepts_legacy_reporter(self.model_reporter):
+                payload = await self.model_reporter(self.config, self.model, prompt, schema, phase)  # type: ignore[misc]
+            else:
+                payload = await self.model_reporter(
+                    self.config, self.provider, self.model, prompt, schema, phase
+                )
             message = _clean_model_message(payload.get("message", ""))
             if not message:
                 return await super()._emit_report()
@@ -385,14 +402,15 @@ class ModelBackedSecretary(LocalSecretary):
 
 async def _default_model_reporter(
     config: dict[str, Any],
+    provider: str,
     model: str,
     prompt: str,
     schema_path: Path,
     phase: str,
 ) -> dict[str, Any]:
-    from .codex_runner import run_secretary_model
+    from .model_runner import run_secretary_model
 
-    return await run_secretary_model(config, model, prompt, schema_path, phase)
+    return await run_secretary_model(config, provider, model, prompt, schema_path, phase)
 
 
 def create_secretary(
@@ -404,6 +422,7 @@ def create_secretary(
     if secretary_config.mode == "model":
         return ModelBackedSecretary(
             config=config,
+            provider=secretary_config.provider,
             model=secretary_config.model,
             verbosity=secretary_config.verbosity,
             stream=stream,
@@ -431,6 +450,21 @@ def _clean_model_message(value: str) -> str:
 def _phase_slug(value: str) -> str:
     slug = "".join(char.lower() if char.isalnum() else "-" for char in value)
     return "-".join(part for part in slug.split("-") if part) or "milestone"
+
+
+def _accepts_legacy_reporter(reporter: ModelReporter) -> bool:
+    try:
+        signature = inspect.signature(reporter)
+    except (TypeError, ValueError):
+        return False
+    positional = [
+        parameter
+        for parameter in signature.parameters.values()
+        if parameter.kind
+        in (parameter.POSITIONAL_ONLY, parameter.POSITIONAL_OR_KEYWORD)
+        and parameter.default is parameter.empty
+    ]
+    return len(positional) == 5
 
 
 def _round_label(round_number: int) -> str:

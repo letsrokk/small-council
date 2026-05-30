@@ -974,12 +974,13 @@ class RichRenderer(BaseRenderer):
     def _members_table(self, members: list[Any]):
         rich = self._rich or _load_rich()
         table = rich.table.Table(title="Council Members", expand=True, box=rich.box.SIMPLE)
-        for header in ["Name", "Role", "Model", "Personality", "Wins", "Proposals", "Votes", "Tie Breaks"]:
+        for header in ["Name", "Role", "Provider", "Model", "Personality", "Wins", "Proposals", "Votes", "Tie Breaks"]:
             table.add_column(header, justify="right" if header in {"Wins", "Proposals", "Votes", "Tie Breaks"} else "left")
         for member in members:
             table.add_row(
                 member.name,
                 "President" if member.is_president else "Member",
+                getattr(member, "provider", "codex"),
                 member.model,
                 member.personality,
                 str(member.total_wins),
@@ -992,7 +993,7 @@ class RichRenderer(BaseRenderer):
     def _leaderboard_table(self, rows: list[dict[str, Any]]):
         rich = self._rich or _load_rich()
         table = rich.table.Table(title="Leaderboard", expand=True, box=rich.box.SIMPLE)
-        for header in ["Rank", "Member", "Role", "Wins", "Proposals", "Win Rate", "Votes", "Tie Breaks", "Model"]:
+        for header in ["Rank", "Member", "Role", "Wins", "Proposals", "Win Rate", "Votes", "Tie Breaks", "Provider", "Model"]:
             table.add_column(header, justify="right" if header in {"Rank", "Wins", "Proposals", "Votes", "Tie Breaks"} else "left")
         for index, row in enumerate(rows, start=1):
             table.add_row(
@@ -1004,6 +1005,7 @@ class RichRenderer(BaseRenderer):
                 f"{row['win_rate']:.0%}",
                 str(row["vote_participation"]),
                 str(row["tie_break_victories"]),
+                row.get("provider", "codex"),
                 row["model"],
             )
         return table
@@ -1051,6 +1053,7 @@ def render_members_text(members: list[Any]) -> str:
             {
                 "Name": member.name,
                 "Role": "President" if member.is_president else "Member",
+                "Provider": getattr(member, "provider", "codex"),
                 "Model": member.model,
                 "Personality": member.personality,
                 "Wins": member.total_wins,
@@ -1060,7 +1063,7 @@ def render_members_text(members: list[Any]) -> str:
             }
         )
     return "Council Members\n" + _format_table(
-        ["Name", "Role", "Model", "Personality", "Wins", "Proposals", "Votes", "Tie Breaks"],
+        ["Name", "Role", "Provider", "Model", "Personality", "Wins", "Proposals", "Votes", "Tie Breaks"],
         rows,
         right_align={"Wins", "Proposals", "Votes", "Tie Breaks"},
     )
@@ -1079,11 +1082,12 @@ def render_leaderboard_text(rows: list[dict[str, Any]]) -> str:
                 "Win Rate": f"{row['win_rate']:.0%}",
                 "Votes": row["vote_participation"],
                 "Tie Breaks": row["tie_break_victories"],
+                "Provider": row.get("provider", "codex"),
                 "Model": row["model"],
             }
         )
     return "Leaderboard\n" + _format_table(
-        ["Rank", "Member", "Role", "Wins", "Proposals", "Win Rate", "Votes", "Tie Breaks", "Model"],
+        ["Rank", "Member", "Role", "Wins", "Proposals", "Win Rate", "Votes", "Tie Breaks", "Provider", "Model"],
         rendered,
         right_align={"Rank", "Wins", "Proposals", "Votes", "Tie Breaks"},
     )

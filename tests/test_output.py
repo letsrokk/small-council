@@ -640,7 +640,8 @@ class OutputRenderingTests(unittest.TestCase):
         config = {
             "storage": {"leaderboard_path": "./storage/leaderboard.json", "council_state_path": "./storage/council-state.json"},
             "runtime": {"temp_path": "./runtime/temp", "logs_path": "./runtime/logs"},
-            "council": {"discussion_rounds": 2, "runoff_rounds": 3, "secretary": {}, "diversity_mode": "balanced"},
+            "council": {"discussion_rounds": 2, "runoff_rounds": 3, "diversity_mode": "balanced"},
+            "secretary": {},
         }
 
         with (
@@ -680,7 +681,8 @@ class OutputRenderingTests(unittest.TestCase):
         config = {
             "storage": {"leaderboard_path": "./storage/leaderboard.json", "council_state_path": "./storage/council-state.json"},
             "runtime": {"temp_path": "./runtime/temp", "logs_path": "./runtime/logs"},
-            "council": {"discussion_rounds": 2, "runoff_rounds": 3, "secretary": {}, "diversity_mode": "balanced"},
+            "council": {"discussion_rounds": 2, "runoff_rounds": 3, "diversity_mode": "balanced"},
+            "secretary": {},
         }
 
         with (
@@ -716,7 +718,8 @@ class OutputRenderingTests(unittest.TestCase):
         config = {
             "storage": {"leaderboard_path": "./storage/leaderboard.json", "council_state_path": "./storage/council-state.json"},
             "runtime": {"temp_path": "./runtime/temp", "logs_path": "./runtime/logs"},
-            "council": {"discussion_rounds": 2, "runoff_rounds": 3, "secretary": {}, "diversity_mode": "balanced"},
+            "council": {"discussion_rounds": 2, "runoff_rounds": 3, "diversity_mode": "balanced"},
+            "secretary": {},
         }
 
         with (

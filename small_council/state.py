@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import ROOT, read_json, resolve_project_path, write_json
+from .model_providers import ModelInfo, effective_model_pool
 
 
 @dataclass(frozen=True)
@@ -20,14 +21,18 @@ class Member:
     total_wins: int = 0
     total_votes_cast: int = 0
     tie_break_victories: int = 0
+    provider: str = "codex"
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "Member":
-        return cls(**payload)
+        data = dict(payload)
+        data.setdefault("provider", "codex")
+        return cls(**data)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "name": self.name,
+            "provider": self.provider,
             "model": self.model,
             "personality": self.personality,
             "is_president": self.is_president,
@@ -46,7 +51,6 @@ def ensure_state(config: dict[str, Any], reset: bool = False) -> list[Member]:
     payload = read_json(state_path, default=None)
     if payload and payload.get("members"):
         members = [Member.from_dict(item) for item in payload["members"]]
-        members = _apply_model_overrides(config, members)
         persist_members(config, members)
         write_agent_files(members)
         return members
@@ -96,6 +100,7 @@ def persist_leaderboard(config: dict[str, Any], members: list[Member]) -> None:
         rows.append(
             {
                 "member": member.name,
+                "provider": member.provider,
                 "model": member.model,
                 "personality": member.personality,
                 "president": member.is_president,
@@ -159,11 +164,10 @@ def now_iso() -> str:
 
 def _create_members(config: dict[str, Any]) -> list[Member]:
     names = config["council"]["member_names"]
-    model_pool = list(config["model_pool"])
     personality_pool = list(config["personality_pool"])
     rng = random.SystemRandom()
 
-    models = _draw_values(rng, model_pool, len(names), unique=True)
+    models = _draw_models(config, [], names, rng)
     personalities = _draw_values(rng, personality_pool, len(names), unique=True)
     president_name = rng.choice(names)
     timestamp = now_iso()
@@ -171,7 +175,8 @@ def _create_members(config: dict[str, Any]) -> list[Member]:
     return [
         Member(
             name=name,
-            model=models[index],
+            provider=models[index].provider,
+            model=models[index].model,
             personality=personalities[index],
             is_president=name == president_name,
             created_at=timestamp,
@@ -184,13 +189,14 @@ def _add_members(config: dict[str, Any], members: list[Member], count: int) -> l
     rng = random.SystemRandom()
     existing_names = {member.name for member in members}
     names = _next_member_names(config, existing_names, count)
-    models = _next_models(config, members, count, rng)
+    models = _next_models(config, members, names, rng)
     personalities = _next_personalities(config, members, count, rng)
     timestamp = now_iso()
     additions = [
         Member(
             name=name,
-            model=models[index],
+            provider=models[index].provider,
+            model=models[index].model,
             personality=personalities[index],
             is_president=False,
             created_at=timestamp,
@@ -234,16 +240,55 @@ def _next_member_names(
 
 
 def _next_models(
-    config: dict[str, Any], members: list[Member], count: int, rng: random.SystemRandom
-) -> list[str]:
-    pool = list(config["model_pool"])
-    used = {member.model for member in members}
-    available = [model for model in pool if model not in used]
+    config: dict[str, Any], members: list[Member], names: list[str], rng: random.SystemRandom
+) -> list[ModelInfo]:
+    return _draw_models(config, members, names, rng)
+
+
+def _draw_models(
+    config: dict[str, Any],
+    members: list[Member],
+    names: list[str],
+    rng: random.SystemRandom,
+) -> list[ModelInfo]:
+    pool = effective_model_pool(config)
+    if not pool:
+        raise ValueError("No enabled models are available from configured providers.")
+    selected_by_name: dict[str, ModelInfo] = {}
+    remaining_names: list[str] = []
+    used = {(member.provider, member.model) for member in members}
+    for name in names:
+        override = _model_override(config, name)
+        if override is None:
+            remaining_names.append(name)
+            continue
+        if not _pool_contains(pool, override):
+            raise ValueError(
+                f"Model override for {name} uses {override.provider}/{override.model}, "
+                "which is outside the effective model pool."
+            )
+        selected_by_name[name] = override
+        used.add((override.provider, override.model))
+
+    prefer_unique = bool(
+        config.get("model_assignment", {}).get("prefer_unique_models", True)
+    )
+    allow_duplicates = bool(
+        config.get("model_assignment", {}).get("allow_duplicates_when_needed", True)
+    )
+    available = [
+        model for model in pool if (model.provider, model.model) not in used
+    ] if prefer_unique else pool[:]
     rng.shuffle(available)
-    selected = available[:count]
-    while len(selected) < count:
-        selected.append(rng.choice(pool))
-    return selected
+    drawn = available[: len(remaining_names)]
+    if len(drawn) < len(remaining_names):
+        if not allow_duplicates:
+            raise ValueError("Not enough unique enabled models are available for council assignment.")
+        while len(drawn) < len(remaining_names):
+            drawn.append(rng.choice(pool))
+    for name, model in zip(remaining_names, drawn):
+        selected_by_name[name] = model
+    return [selected_by_name[name] for name in names]
 
 
 def _next_personalities(
@@ -263,21 +308,42 @@ def _apply_model_overrides(config: dict[str, Any], members: list[Member]) -> lis
     overrides = config.get("model_overrides") or {}
     if not overrides:
         return members
-    allowed_models = set(config["model_pool"])
+    pool = effective_model_pool(config)
     updated: list[Member] = []
     for member in members:
-        override = overrides.get(member.name)
+        override = _model_override(config, member.name)
         if not override:
             updated.append(member)
             continue
-        if override not in allowed_models:
+        if not _pool_contains(pool, override):
             raise ValueError(
-                f"Model override for {member.name} uses {override}, which is outside model_pool."
+                f"Model override for {member.name} uses {override.provider}/{override.model}, "
+                "which is outside the effective model pool."
             )
         data = member.to_dict()
-        data["model"] = override
+        data["provider"] = override.provider
+        data["model"] = override.model
         updated.append(Member.from_dict(data))
     return updated
+
+
+def _model_override(config: dict[str, Any], name: str) -> ModelInfo | None:
+    overrides = config.get("model_overrides") or {}
+    if not isinstance(overrides, dict):
+        return None
+    raw = overrides.get(name)
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        return ModelInfo(
+            provider=str(raw.get("provider", "codex")),
+            model=str(raw.get("model", "")),
+        )
+    return ModelInfo(provider="codex", model=str(raw))
+
+
+def _pool_contains(pool: list[ModelInfo], model: ModelInfo) -> bool:
+    return any(item.provider == model.provider and item.model == model.model for item in pool)
 
 
 def _draw_values(
@@ -305,6 +371,7 @@ def write_agent_files(members: list[Member]) -> None:
         content = f"""# {member.name}
 
 Role: {role}
+Provider: {member.provider}
 Model: {member.model}
 Personality: {member.personality}
 
