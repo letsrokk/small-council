@@ -7,9 +7,12 @@ import shutil
 import shlex
 import subprocess
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TextIO
+
+from small_council.config import load_config, save_config
 
 from .golden import golden_score, load_golden_datasets, resolve_golden, validate_golden_references
 from .judges import JudgeConfig, judge_result, load_judge_config
@@ -28,6 +31,12 @@ from .utils import extract_last_valid_json, filter_cases, git_commit, load_suite
 
 
 DEFAULT_COUNCIL_CMD = "./council --secretary local"
+
+
+@dataclass(frozen=True)
+class EvalSandbox:
+    config_path: Path
+    roots: dict[Path, Path]
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -141,20 +150,27 @@ def _run_deterministic(
     results: list[CaseRunResult] = []
     total_runs = len(cases) * args.repeat
     run_id = _run_id(metadata.timestamp)
+    sandbox = _create_eval_sandbox(Path(args.artifact_dir), run_id)
     _print_start(args, cases, total_runs)
     run_index = 0
     for case in cases:
         for repeat_index in range(1, args.repeat + 1):
             run_index += 1
             _print_case_start(args, run_index, total_runs, case, repeat_index, suite_start)
-            before = _artifact_snapshot()
-            execution = execute_case(case, args.council_cmd, args.timeout_seconds)
+            before = _artifact_snapshot(sandbox.roots)
+            execution = execute_case(
+                case,
+                args.council_cmd,
+                args.timeout_seconds,
+                config_path=sandbox.config_path,
+            )
             artifact_paths = _capture_artifacts(
                 before,
                 Path(args.artifact_dir),
                 run_id,
                 case.id,
                 repeat_index,
+                sandbox.roots,
             )
             validation = validate_result(case, execution)
             score = score_case(case, execution, validation)
@@ -175,7 +191,12 @@ def _run_deterministic(
     return EvalReport(metadata=metadata, results=results)
 
 
-def execute_case(case, council_cmd: str, timeout_seconds: float) -> CouncilExecution:
+def execute_case(
+    case,
+    council_cmd: str,
+    timeout_seconds: float,
+    config_path: Path | None = None,
+) -> CouncilExecution:
     command = [
         *shlex.split(council_cmd),
         *case.args,
@@ -191,7 +212,7 @@ def execute_case(case, council_cmd: str, timeout_seconds: float) -> CouncilExecu
             text=True,
             timeout=timeout_seconds,
             check=False,
-            env=_benchmark_env(),
+            env=_benchmark_env(config_path),
         )
         duration = time.monotonic() - start
         payload, error = extract_last_valid_json(completed.stdout)
@@ -222,9 +243,11 @@ def execute_case(case, council_cmd: str, timeout_seconds: float) -> CouncilExecu
         )
 
 
-def _benchmark_env() -> dict[str, str]:
+def _benchmark_env(config_path: Path | None = None) -> dict[str, str]:
     env = os.environ.copy()
     env["SMALL_COUNCIL_BENCHMARK"] = "1"
+    if config_path is not None:
+        env["SMALL_COUNCIL_CONFIG"] = str(config_path)
     return env
 
 
@@ -340,8 +363,40 @@ def _apply_hard_caps(score: int, failures: list[str]) -> int:
     return capped
 
 
-def _artifact_snapshot() -> dict[Path, float]:
-    roots = [Path("runtime/logs"), Path("runtime/temp"), Path("storage")]
+def _create_eval_sandbox(artifact_dir: Path, run_id: str) -> EvalSandbox:
+    sandbox_root = artifact_dir / run_id / "sandbox"
+    config_path = sandbox_root / "config" / "council.yaml"
+    storage_root = sandbox_root / "storage"
+    runtime_root = sandbox_root / "runtime"
+    config = load_config()
+    config.setdefault("storage", {})
+    config.setdefault("runtime", {})
+    config["storage"]["council_state_path"] = str(storage_root / "council-state.json")
+    config["storage"]["leaderboard_path"] = str(storage_root / "leaderboard.json")
+    config["storage"]["memories_path"] = str(storage_root / "memories")
+    config["runtime"]["sessions_path"] = str(runtime_root / "sessions")
+    config["runtime"]["logs_path"] = str(runtime_root / "logs")
+    config["runtime"]["temp_path"] = str(runtime_root / "temp")
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    save_config(config, config_path)
+    return EvalSandbox(
+        config_path=config_path,
+        roots={
+            config_path.parent: Path("config"),
+            runtime_root / "logs": Path("runtime/logs"),
+            runtime_root / "temp": Path("runtime/temp"),
+            storage_root: Path("storage"),
+        },
+    )
+
+
+def _artifact_snapshot(roots: dict[Path, Path] | None = None) -> dict[Path, float]:
+    if roots is None:
+        roots = {
+            Path("runtime/logs"): Path("runtime/logs"),
+            Path("runtime/temp"): Path("runtime/temp"),
+            Path("storage"): Path("storage"),
+        }
     snapshot: dict[Path, float] = {}
     for root in roots:
         if not root.exists():
@@ -361,8 +416,15 @@ def _capture_artifacts(
     run_id: str,
     case_id: str,
     repeat_index: int,
+    roots: dict[Path, Path] | None = None,
 ) -> list[str]:
-    after = _artifact_snapshot()
+    if roots is None:
+        roots = {
+            Path("runtime/logs"): Path("runtime/logs"),
+            Path("runtime/temp"): Path("runtime/temp"),
+            Path("storage"): Path("storage"),
+        }
+    after = _artifact_snapshot(roots)
     changed = [
         path
         for path, mtime in after.items()
@@ -374,13 +436,23 @@ def _capture_artifacts(
     copied: list[str] = []
     for path in sorted(changed):
         try:
-            target = destination / path
+            target = destination / _artifact_relative_path(path, roots)
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(path, target)
             copied.append(str(target))
         except OSError:
             continue
     return copied
+
+
+def _artifact_relative_path(path: Path, roots: dict[Path, Path]) -> Path:
+    resolved_path = path.resolve()
+    for root, prefix in roots.items():
+        try:
+            return prefix / resolved_path.relative_to(root.resolve())
+        except ValueError:
+            continue
+    return Path(path.name)
 
 
 def load_json_report(path: str | Path) -> EvalReport:

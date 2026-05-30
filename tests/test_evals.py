@@ -23,8 +23,11 @@ from evals.judges import JudgeResult, _judge_config, load_judge_config, parse_ju
 from evals.report import render_markdown, write_json_report
 from evals.run_eval import (
     DEFAULT_COUNCIL_CMD,
+    _artifact_snapshot,
     _backup_previous_report,
+    _capture_artifacts,
     _compare_with_previous,
+    _create_eval_sandbox,
     _format_duration,
     _progress_timing,
     execute_case,
@@ -685,6 +688,121 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(0, execution.exit_code)
         self.assertEqual("1", execution.json_payload["benchmark"])
 
+    def test_execute_case_passes_eval_sandbox_config(self) -> None:
+        case = load_suite("evals/cases.yaml")[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "council.yaml"
+            config_path.write_text("storage:\n  council_state_path: ./tmp-state.json\n", encoding="utf-8")
+            command = (
+                "python -c \"import json, os; "
+                "print(json.dumps({"
+                "'benchmark': os.environ.get('SMALL_COUNCIL_BENCHMARK'), "
+                "'config': os.environ.get('SMALL_COUNCIL_CONFIG')"
+                "}))\""
+            )
+
+            execution = execute_case(case, command, timeout_seconds=5, config_path=config_path)
+
+        self.assertEqual(0, execution.exit_code)
+        self.assertEqual("1", execution.json_payload["benchmark"])
+        self.assertEqual(str(config_path), execution.json_payload["config"])
+
+    def test_eval_sandbox_config_uses_isolated_state_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "artifacts"
+            sandbox = _create_eval_sandbox(artifact_dir, "run-1")
+            config_text = sandbox.config_path.read_text(encoding="utf-8")
+
+        self.assertIn("run-1/sandbox/storage/council-state.json", config_text)
+        self.assertIn("run-1/sandbox/storage/leaderboard.json", config_text)
+        self.assertIn("run-1/sandbox/storage/memories", config_text)
+        self.assertIn("run-1/sandbox/runtime/logs", config_text)
+        self.assertIn("run-1/sandbox/runtime/temp", config_text)
+
+    def test_capture_artifacts_uses_sandbox_relative_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            artifact_dir = Path(tmp) / "artifacts"
+            sandbox = _create_eval_sandbox(artifact_dir, "run-1")
+            before = _artifact_snapshot(sandbox.roots)
+            state_path = artifact_dir / "run-1" / "sandbox" / "storage" / "council-state.json"
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state_path.write_text('{"members": []}\n', encoding="utf-8")
+
+            copied = _capture_artifacts(before, artifact_dir, "run-1", "CASE01", 1, sandbox.roots)
+
+        self.assertEqual(
+            [str(artifact_dir / "run-1" / "CASE01-r1" / "storage" / "council-state.json")],
+            copied,
+        )
+
+    def test_main_isolates_state_mutating_eval_case(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            suite = root / "cases.json"
+            output = root / "latest.json"
+            markdown = root / "latest.md"
+            artifacts = root / "artifacts"
+            real_storage = root / "real-storage"
+            suite.write_text(
+                json.dumps(
+                    [
+                        {
+                            "id": "STATE_TEST",
+                            "name": "State Test",
+                            "category": "state",
+                            "prompt": "Choose one picnic food: sandwiches, fruit, or cookies.",
+                            "tags": ["state"],
+                            "args": ["--set-members", "3"],
+                            "expected_behavior": ["mutates state"],
+                            "scoring_focus": ["state"],
+                            "hard_failure_rules": ["winner_missing"],
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            config = {
+                "storage": {
+                    "council_state_path": str(real_storage / "council-state.json"),
+                    "leaderboard_path": str(real_storage / "leaderboard.json"),
+                    "memories_path": str(real_storage / "memories"),
+                },
+                "runtime": {
+                    "sessions_path": str(root / "real-runtime" / "sessions"),
+                    "logs_path": str(root / "real-runtime" / "logs"),
+                    "temp_path": str(root / "real-runtime" / "temp"),
+                },
+            }
+            command = _mock_state_writing_council_command(_valid_payload())
+
+            with (
+                patch("evals.run_eval.load_config", return_value=config),
+                redirect_stdout(io.StringIO()),
+            ):
+                exit_code = main(
+                    [
+                        "--suite",
+                        str(suite),
+                        "--timeout-seconds",
+                        "5",
+                        "--council-cmd",
+                        command,
+                        "--artifact-dir",
+                        str(artifacts),
+                        "--output",
+                        str(output),
+                        "--markdown",
+                        str(markdown),
+                    ]
+                )
+
+            report = json.loads(output.read_text(encoding="utf-8"))
+            artifact_paths = report["results"][0]["artifact_paths"]
+
+        self.assertEqual(0, exit_code)
+        self.assertFalse((real_storage / "council-state.json").exists())
+        self.assertTrue(any(path.endswith("storage/council-state.json") for path in artifact_paths))
+
 
 def _valid_payload() -> dict:
     return {
@@ -717,6 +835,21 @@ def _valid_payload() -> dict:
 def _mock_council_command(payload: dict) -> str:
     encoded = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
     return f'python -c "import base64; print(base64.b64decode(\'{encoded}\').decode())"'
+
+
+def _mock_state_writing_council_command(payload: dict) -> str:
+    payload_encoded = base64.b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+    script = (
+        "import base64,json,os,pathlib;"
+        f"payload=json.loads(base64.b64decode('{payload_encoded}'));"
+        "config=pathlib.Path(os.environ['SMALL_COUNCIL_CONFIG']);"
+        "state=config.parent.parent/'storage'/'council-state.json';"
+        "state.parent.mkdir(parents=True, exist_ok=True);"
+        "state.write_text('{\"members\":[1,2,3]}\\n', encoding='utf-8');"
+        "print(json.dumps(payload))"
+    )
+    script_encoded = base64.b64encode(script.encode("utf-8")).decode("ascii")
+    return f'python -c "import base64; exec(base64.b64decode(\'{script_encoded}\'))"'
 
 
 def _case_result(case, score: int, passed: bool, failures: list[str]) -> CaseRunResult:

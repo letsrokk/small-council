@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import io
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from small_council import cli, state
 from small_council.codex_runner import CodexProvider, list_codex_models
-from small_council.config import load_config, set_config_value
+from small_council.config import load_config, save_config, set_config_value
 from small_council.model_providers import (
     ModelInfo,
     effective_models_for_provider,
@@ -372,6 +374,37 @@ class StateAssignmentTests(unittest.TestCase):
 
 
 class ConfigSetTests(unittest.TestCase):
+    def test_load_and_save_config_respect_environment_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "council.yaml"
+            path.write_text("secretary:\n  provider: ollama\n", encoding="utf-8")
+            with patch.dict("os.environ", {"SMALL_COUNCIL_CONFIG": str(path)}):
+                config = load_config()
+                config["secretary"]["model"] = "qwen3:8b"
+                save_config(config)
+
+            saved = path.read_text(encoding="utf-8")
+
+        self.assertIn("provider: ollama", saved)
+        self.assertIn("model: qwen3:8b", saved)
+
+    def test_explicit_config_path_overrides_environment_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / "env.yaml"
+            explicit_path = Path(tmp) / "explicit.yaml"
+            env_path.write_text("secretary:\n  provider: env\n", encoding="utf-8")
+            explicit_path.write_text("secretary:\n  provider: explicit\n", encoding="utf-8")
+            with patch.dict("os.environ", {"SMALL_COUNCIL_CONFIG": str(env_path)}):
+                config = load_config(explicit_path)
+                save_config({"secretary": {"provider": "saved"}}, explicit_path)
+
+            env_saved = env_path.read_text(encoding="utf-8")
+            explicit_saved = explicit_path.read_text(encoding="utf-8")
+
+        self.assertEqual("explicit", config["secretary"]["provider"])
+        self.assertIn("provider: env", env_saved)
+        self.assertIn("provider: saved", explicit_saved)
+
     def test_set_updates_secretary_provider(self) -> None:
         config = {"secretary": {"provider": "codex", "model": "gpt-5.5"}}
 

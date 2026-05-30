@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -9,18 +10,29 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = ROOT / "config" / "council.yaml"
 
 
-def load_config(path: Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
+def _config_path(path: Path | None = None) -> Path:
+    if path is not None:
+        return path
+    env_path = os.environ.get("SMALL_COUNCIL_CONFIG")
+    if env_path:
+        return Path(env_path)
+    return DEFAULT_CONFIG_PATH
+
+
+def load_config(path: Path | None = None) -> dict[str, Any]:
     """Load the project-local YAML config.
 
     The parser intentionally supports the small YAML subset used by this
     project so the CLI has no package dependency just to boot.
     """
+    path = _config_path(path)
     if not path.exists():
         raise FileNotFoundError(f"Missing config file: {path}")
     return _parse_simple_yaml(path.read_text(encoding="utf-8"))
 
 
-def save_config(config: dict[str, Any], path: Path = DEFAULT_CONFIG_PATH) -> None:
+def save_config(config: dict[str, Any], path: Path | None = None) -> None:
+    path = _config_path(path)
     path.write_text(_dump_simple_yaml(config), encoding="utf-8")
 
 

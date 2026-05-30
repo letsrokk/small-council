@@ -141,10 +141,13 @@ Useful post-processing options:
   --judge-weight 0.20
 ```
 
-Fresh deterministic runs snapshot modified `runtime/logs`, `runtime/temp`, and
-`storage` files into `evals/reports/artifacts/` for later judge context. When
-`--skip` is used with an older report that has no artifact paths, judging still
-uses the deterministic report data.
+Fresh deterministic runs use an eval-local config sandbox under
+`evals/reports/artifacts/<run-id>/sandbox/`, so cases that resize members or
+change persisted settings do not mutate the real project `storage/`,
+`runtime/`, or `config/council.yaml`. Modified sandbox `runtime`, `storage`, and
+config files are copied into each case artifact directory for later judge
+context. When `--skip` is used with an older report that has no artifact paths,
+judging still uses the deterministic report data.
 
 ## Previous Report Comparison
 
