@@ -79,6 +79,22 @@ secretary:
   model: qwen3:4b
   verbosity: balanced
 
+search:
+  enabled: true
+  provider: searxng
+  baseUrl: http://localhost:8080
+  timeoutSeconds: 15
+  maxResults: 8
+  cacheTtlSeconds: 900
+  minDelaySeconds: 3
+  maxConcurrentRequests: 1
+  defaultEngines:
+    - bing
+    - wikipedia
+    - wikidata
+    - github
+    - stackoverflow
+
 personality_assignment:
   mode: random_on_creation
   persist_assignment: true

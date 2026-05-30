@@ -64,6 +64,7 @@ from .state import (
     update_after_decision,
     write_agent_files,
 )
+from .web_search import create_search_provider, create_search_worker, search_enabled, web_search_config
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -89,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--plain-output", action="store_true", help="Force plain human-readable output.")
     parser.add_argument("--rich-output", action="store_true", help="Force Rich terminal output.")
     parser.add_argument("--json-output", action="store_true", help="Print the final decision payload as JSON.")
-    parser.add_argument("--no-search", action="store_true", help="Disable Codex web search during independent research.")
+    parser.add_argument("--no-search", action="store_true", help="Disable web search during independent research.")
     parser.add_argument("--doctor", action="store_true", help="Check configured model providers.")
     parser.add_argument("--models", action="store_true", help="List discovered, static, and effective models.")
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="Persist a config value.")
@@ -170,7 +171,7 @@ def main(argv: list[str] | None = None) -> int:
                     secretary_verbosity=secretary_config.verbosity,
                     discussion_rounds=_discussion_rounds(config),
                     runoff_round_limit=_runoff_rounds(config, args),
-                    web_search_enabled=not args.no_search,
+                    web_search_enabled=(not args.no_search) and search_enabled(config),
                 )
             )
             renderer.seed_members(members)
@@ -757,11 +758,14 @@ async def _run_jobs_with_secretary(
     on_result,
 ):
     tasks = []
+    search_worker = create_search_worker(config) if search_enabled(config) else None
     for member, prompt, schema, phase, web_search in jobs:
         if renderer:
             renderer.member_status(member.name, f"running {phase}")
         task = asyncio.create_task(
-            _run_member_with_retries(config, member, prompt, schema, phase, web_search, secretary)
+            _run_member_with_retries(
+                config, member, prompt, schema, phase, web_search, secretary, search_worker
+            )
         )
         tasks.append(task)
     results = []
@@ -790,6 +794,7 @@ async def _run_member_with_retries(
     phase: str,
     web_search: bool,
     secretary: BaseSecretary,
+    search_worker=None,
 ):
     retries = max(0, int(config.get("codex", {}).get("retries", 2)))
     max_attempts = retries + 1
@@ -797,7 +802,9 @@ async def _run_member_with_retries(
     attempt = 1
     while True:
         try:
-            return await run_member(config, member, prompt, schema, phase, web_search)
+            return await run_member(
+                config, member, prompt, schema, phase, web_search, search_worker
+            )
         except CodexUsageLimitError as exc:
             secretary.agent_run_failed(
                 member.name, phase, exc.message, False, attempt, max_attempts
@@ -976,6 +983,15 @@ def _doctor_text(config: dict) -> str:
     secretary = _secretary_config(config, argparse.Namespace(secretary=None, secretary_verbosity=None, secretary_immediate_updates=True))
     lines.append("")
     lines.append(f"Secretary: {secretary.provider}/{secretary.model}")
+    search_config = web_search_config(config)
+    search_provider = create_search_provider(config)
+    lines.append(
+        "Web search: "
+        f"{'enabled' if search_enabled(config) else 'disabled'} "
+        f"provider={search_config['provider']} "
+        f"baseUrl={search_config['baseUrl']} "
+        f"status={'configured' if search_provider else 'unavailable'}"
+    )
     if not effective_model_pool(config):
         lines.append("Validation: no enabled models are available.")
     try:
@@ -1054,6 +1070,22 @@ def _validate_set_value(key: str, value) -> None:
     if key.endswith(".enabled") or key.endswith(".discover_models") or key.endswith(".allow_unknown_size_models"):
         if not isinstance(value, bool):
             raise ValueError(f"{key} must be true or false.")
+    if key in {"search.enabled", "webSearch.enabled"} and not isinstance(value, bool):
+        raise ValueError(f"{key} must be true or false.")
+    if key in {
+        "search.timeoutSeconds",
+        "search.maxResults",
+        "search.minDelaySeconds",
+        "search.maxConcurrentRequests",
+        "webSearch.timeoutSeconds",
+        "webSearch.maxResults",
+    }:
+        if not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError(f"{key} must be a positive number.")
+    if key == "search.cacheTtlSeconds" and (
+        not isinstance(value, (int, float)) or value < 0
+    ):
+        raise ValueError("search.cacheTtlSeconds must be zero or a positive number.")
     if key.endswith(".max_parameters") and value is not None and parse_parameter_limit(value) is None:
         raise ValueError(f"{key} must be a size like 12b or null.")
     if key == "secretary.provider":

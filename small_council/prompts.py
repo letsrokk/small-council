@@ -49,6 +49,24 @@ Known local preferences/history:
 """
 
 
+def search_plan_prompt(member: Member, prompt: str) -> str:
+    return f"""{BASE_RULES}
+
+Council member:
+- Name: {member.name}
+- Model: {member.model}
+- Personality: {member.personality}
+
+You may request web searches before answering the task below.
+Return only JSON with a queries array.
+Use 0 queries if current or external information is not needed.
+Use at most 3 concise search queries.
+
+Task prompt:
+{prompt}
+"""
+
+
 def discussion_prompt(
     member: Member,
     question: str,

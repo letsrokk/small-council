@@ -111,6 +111,54 @@ List what the app sees:
 ./council --doctor
 ```
 
+## Web Search With SearXNG
+
+Small Council members use one shared Search Worker during independent research for current or external information. The worker centralizes SearXNG access, applies caching, joins duplicate in-flight queries, and rate-limits outbound requests so concurrent members do not hammer SearXNG or upstream search engines.
+
+Host-local SearXNG:
+
+```yaml
+search:
+  enabled: true
+  provider: searxng
+  baseUrl: http://localhost:8080
+  timeoutSeconds: 15
+  maxResults: 8
+  cacheTtlSeconds: 900
+  minDelaySeconds: 3
+  maxConcurrentRequests: 1
+  defaultEngines:
+    - bing
+    - wikipedia
+    - wikidata
+    - github
+    - stackoverflow
+```
+
+When running the app inside Docker Compose with a `searxng` service on the same network, use:
+
+```yaml
+search:
+  enabled: true
+  provider: searxng
+  baseUrl: http://searxng:8080
+  timeoutSeconds: 15
+  maxResults: 8
+  cacheTtlSeconds: 900
+  minDelaySeconds: 3
+  maxConcurrentRequests: 1
+  defaultEngines:
+    - bing
+    - wikipedia
+    - wikidata
+    - github
+    - stackoverflow
+```
+
+SearXNG requests use `/search?q=<query>&format=json` with optional comma-separated `engines`. During research, a member can request searches such as `latest movies streaming this week`, receive compact title/URL/snippet/source results, and use that context in its recommendation. Use `--no-search` to disable web search for a single run.
+
+The default engine list is tuned for local agent use: `bing`, `wikipedia`, `wikidata`, `github`, and `stackoverflow`. This avoids the most fragile scraping engines by default and reduces Brave, DuckDuckGo, and Startpage rate-limit issues. Startpage, DuckDuckGo, Google, and Brave scraping engines may still rate-limit or CAPTCHA under agentic workloads if you enable them.
+
 ## Output And Progress
 
 Decision output is human-readable by default. Use JSON when you want a structured payload:
