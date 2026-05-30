@@ -31,6 +31,11 @@ from .decision import (
     validate_vote,
 )
 from .formatting import render_fallback
+from .guardrails import (
+    final_output_with_guardrails,
+    sanitize_recommendations,
+    sanitize_vote,
+)
 from .memory import append_decision_memory, load_recent_memory
 from .model_providers import (
     effective_model_pool,
@@ -322,6 +327,7 @@ async def _run_decision(
                     memory,
                     diversity_lane=diversity_lanes[member.name],
                     diversity_mode=diversity_mode,
+                    web_search_enabled=web_search and search_enabled(config),
                 ),
                 research_schema,
                 "research",
@@ -341,6 +347,9 @@ async def _run_decision(
         draft_recommendations = [
             validate_recommendation(result.payload, result.member) for result in research_results
         ]
+        draft_recommendations = sanitize_recommendations(
+            question, draft_recommendations, web_search_enabled=web_search and search_enabled(config)
+        )
         current_recommendations = draft_recommendations
         await secretary.report_milestone("initial proposals complete")
 
@@ -390,6 +399,7 @@ async def _run_decision(
             )
             round_messages = []
             next_recommendations = []
+            discussion_entries = []
             result_by_member = {result.member.name: result for result in discussion_results}
             for member in members:
                 result = result_by_member[member.name]
@@ -402,10 +412,33 @@ async def _run_decision(
                 changed = _normalize_option(
                     revised_recommendation.get("recommendation", "")
                 ) != _normalize_option(prior_recommendation.get("recommendation", ""))
-                round_messages.append(
+                discussion_entries.append(
                     {
                         "member": member.name,
                         "discussion_reply": discussion_reply,
+                        "prior_recommendation": prior_recommendation,
+                        "changed": changed,
+                    }
+                )
+                next_recommendations.append(revised_recommendation)
+            next_recommendations = sanitize_recommendations(
+                question,
+                next_recommendations,
+                web_search_enabled=web_search and search_enabled(config),
+            )
+            for entry in discussion_entries:
+                member_name = str(entry["member"])
+                revised_recommendation = _recommendation_for_proposer(
+                    next_recommendations, member_name
+                )
+                prior_recommendation = entry["prior_recommendation"]
+                changed = _normalize_option(
+                    revised_recommendation.get("recommendation", "")
+                ) != _normalize_option(prior_recommendation.get("recommendation", ""))
+                round_messages.append(
+                    {
+                        "member": member_name,
+                        "discussion_reply": entry["discussion_reply"],
                         "prior_recommendation": prior_recommendation.get("recommendation"),
                         "revised_recommendation": revised_recommendation.get("recommendation"),
                         "changed": changed,
@@ -414,14 +447,13 @@ async def _run_decision(
                 discussion_transcript.append(
                     {
                         "round": discussion_round,
-                        "member": member.name,
-                        "discussion_reply": discussion_reply,
+                        "member": member_name,
+                        "discussion_reply": entry["discussion_reply"],
                         "prior_recommendation": prior_recommendation.get("recommendation"),
                         "revised_recommendation": revised_recommendation,
                         "changed": changed,
                     }
                 )
-                next_recommendations.append(revised_recommendation)
             current_recommendations = next_recommendations
             discussion_round_payloads.append(
                 {
@@ -470,8 +502,11 @@ async def _run_decision(
             lambda result: _secretary_vote_done(result, secretary, recommendation_groups, 0),
         )
         votes = [
-            canonicalize_vote(
-                _tag_vote(validate_vote(result.payload, result.member), 0), recommendation_groups
+            sanitize_vote(
+                canonicalize_vote(
+                    _tag_vote(validate_vote(result.payload, result.member), 0), recommendation_groups
+                ),
+                voting_recommendations,
             )
             for result in vote_results
         ]
@@ -515,9 +550,12 @@ async def _run_decision(
                 ),
             )
             runoff_votes = [
-                canonicalize_vote(
-                    _tag_vote(validate_vote(result.payload, result.member), runoff_round),
-                    recommendation_groups,
+                sanitize_vote(
+                    canonicalize_vote(
+                        _tag_vote(validate_vote(result.payload, result.member), runoff_round),
+                        recommendation_groups,
+                    ),
+                    current_recommendations,
                 )
                 for result in runoff_results
             ]
@@ -591,6 +629,7 @@ async def _run_decision(
             summary_schema,
             decision,
             max_runoff_rounds,
+            web_search_enabled=web_search and search_enabled(config),
         )
         secretary.set_phase("finished")
         return {
@@ -838,6 +877,7 @@ async def _final_output(
     summary_schema,
     decision,
     max_runoff_rounds: int,
+    web_search_enabled: bool = True,
 ) -> str:
     try:
         summary_result = await run_member(
@@ -850,28 +890,43 @@ async def _final_output(
             "summary",
             False,
         )
-        return summary_result.payload["final_output"]
+        return final_output_with_guardrails(
+            question,
+            summary_result.payload["final_output"],
+            decision.winning_option,
+            web_search_enabled=web_search_enabled,
+        )
     except Exception:
         if decision.status == "unresolved_tie":
-            return render_fallback(
+            return final_output_with_guardrails(
+                question,
+                render_fallback(
+                    None,
+                    f"No single winner after {max_runoff_rounds} runoff round(s).",
+                    all_votes,
+                    leaderboard,
+                    tied_options=decision.tied_options,
+                ),
                 None,
-                f"No single winner after {max_runoff_rounds} runoff round(s).",
-                all_votes,
-                leaderboard,
-                tied_options=decision.tied_options,
+                web_search_enabled=web_search_enabled,
             )
         why = "Won the council vote"
         if len(decision.vote_rounds) > 1:
             why += f" after {len(decision.vote_rounds) - 1} runoff round(s)"
         if decision.tie_broken_by:
             why += f"; tie broken by {decision.tie_broken_by}"
-        return render_fallback(
+        return final_output_with_guardrails(
+            question,
+            render_fallback(
+                decision.winning_option,
+                why + ".",
+                all_votes,
+                leaderboard,
+                winning_members=decision.winning_members,
+                tie_broken_by=decision.tie_broken_by,
+            ),
             decision.winning_option,
-            why + ".",
-            all_votes,
-            leaderboard,
-            winning_members=decision.winning_members,
-            tie_broken_by=decision.tie_broken_by,
+            web_search_enabled=web_search_enabled,
         )
 
 

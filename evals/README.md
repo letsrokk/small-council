@@ -3,7 +3,7 @@
 This package provides a deterministic benchmark harness for Small Council. It treats the app as a black box and invokes the CLI through:
 
 ```bash
-./council --json-output --plain-output "your prompt"
+./council --secretary local --json-output --plain-output "your prompt"
 ```
 
 Run the full suite:
@@ -37,16 +37,17 @@ Useful options:
   --version-name local-change \
   --repeat 3 \
   --timeout-seconds 600 \
-  --council-cmd ./council
+  --council-cmd "./council --secretary local"
 ```
 
 The framework captures stdout, stderr, duration, exit code, parsed JSON, validation warnings, deterministic score breakdowns, and report metadata. It continues after individual case failures.
 
 ## Benchmark Provider Defaults
 
-Eval runs automatically set benchmark mode for the council subprocess. This
-leaves normal `config/council.yaml` defaults unchanged while forcing
-benchmark-specific provider options:
+Eval runs use the local Secretary by default to avoid spending model calls on
+progress reports during benchmarks. They also automatically set benchmark mode
+for the council subprocess. This leaves normal `config/council.yaml` defaults
+unchanged while forcing benchmark-specific provider options:
 
 - Ollama: `temperature: 0.3`, `seed: 42`
 - Codex: `reasoning_effort: low`

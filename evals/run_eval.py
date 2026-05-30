@@ -17,6 +17,9 @@ from .scorers import score_case, validate_result
 from .utils import extract_last_valid_json, filter_cases, git_commit, load_suite
 
 
+DEFAULT_COUNCIL_CMD = "./council --secretary local"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run deterministic Small Council evals.")
     parser.add_argument("--case", dest="case_id")
@@ -28,7 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version-name")
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=float, default=600)
-    parser.add_argument("--council-cmd", default="./council")
+    parser.add_argument("--council-cmd", default=DEFAULT_COUNCIL_CMD)
     parser.add_argument("--quiet", action="store_true", help="Suppress progress output.")
     parser.add_argument(
         "--verbose",

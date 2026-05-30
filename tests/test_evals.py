@@ -20,6 +20,7 @@ from evals.models import (
 )
 from evals.report import render_markdown, write_json_report
 from evals.run_eval import (
+    DEFAULT_COUNCIL_CMD,
     _backup_previous_report,
     _compare_with_previous,
     _format_duration,
@@ -157,6 +158,9 @@ class ScoringTests(unittest.TestCase):
 
 
 class RunnerTests(unittest.TestCase):
+    def test_default_council_command_uses_local_secretary(self) -> None:
+        self.assertEqual("./council --secretary local", DEFAULT_COUNCIL_CMD)
+
     def test_format_duration_uses_compact_units(self) -> None:
         self.assertEqual("12s", _format_duration(12))
         self.assertEqual("3m 08s", _format_duration(188))
