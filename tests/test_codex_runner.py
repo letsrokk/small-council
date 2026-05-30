@@ -2,16 +2,39 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from small_council.codex_runner import (
     CodexRunError,
     CodexUsageLimitError,
+    _codex_env,
     _codex_error_for_exit,
 )
 from small_council.state import Member
 
 
 class CodexErrorClassificationTests(unittest.TestCase):
+    def test_codex_home_comes_from_provider_config(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            home = Path(temp_dir) / "nested-home"
+            config = {"model_providers": {"codex": {"project_local_home": "./nested-home"}}}
+
+            with patch("small_council.codex_runner.resolve_project_path", return_value=home):
+                env = _codex_env(config)
+
+        self.assertEqual(str(home), env["CODEX_HOME"])
+
+    def test_codex_home_falls_back_to_legacy_codex_block(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            home = Path(temp_dir) / "legacy-home"
+            config = {"codex": {"project_local_home": "./legacy-home"}}
+
+            with patch("small_council.codex_runner.resolve_project_path", return_value=home):
+                env = _codex_env(config)
+
+        self.assertEqual(str(home), env["CODEX_HOME"])
+
     def test_usage_limit_exit_is_non_retryable(self) -> None:
         member = Member(
             name="Aurelia",

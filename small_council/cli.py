@@ -36,6 +36,7 @@ from .model_providers import (
     effective_model_pool,
     parse_parameter_limit,
     provider_report,
+    provider_runtime_setting,
 )
 from .model_runner import run_member
 from .output import (
@@ -795,9 +796,12 @@ async def _run_member_with_retries(
     secretary: BaseSecretary,
     search_worker=None,
 ):
-    retries = max(0, int(config.get("codex", {}).get("retries", 2)))
+    retries = max(0, int(provider_runtime_setting(config, "codex", "retries", 2)))
     max_attempts = retries + 1
-    base_delay = max(0.0, float(config.get("codex", {}).get("retry_base_delay_seconds", 1.0)))
+    base_delay = max(
+        0.0,
+        float(provider_runtime_setting(config, "codex", "retry_base_delay_seconds", 1.0)),
+    )
     attempt = 1
     while True:
         try:

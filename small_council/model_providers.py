@@ -117,6 +117,25 @@ def provider_config(config: dict[str, Any], provider: str) -> dict[str, Any]:
     return normalize_provider_config(config).get(provider, _provider_defaults(provider))
 
 
+def provider_runtime_setting(
+    config: dict[str, Any],
+    provider: str,
+    key: str,
+    default: Any,
+) -> Any:
+    providers = config.get("model_providers")
+    if isinstance(providers, dict):
+        provider_config = providers.get(provider)
+        if isinstance(provider_config, dict) and key in provider_config:
+            return provider_config[key]
+
+    legacy_config = config.get(provider)
+    if isinstance(legacy_config, dict) and key in legacy_config:
+        return legacy_config[key]
+
+    return default
+
+
 def provider_options(
     config: dict[str, Any],
     provider: str,

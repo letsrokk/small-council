@@ -18,6 +18,7 @@ from .model_providers import (
     effective_models_for_provider,
     provider_config,
     provider_options,
+    provider_runtime_setting,
 )
 from .state import Member
 
@@ -239,7 +240,9 @@ async def run_many(
 
 def _codex_env(config: dict[str, Any] | None = None) -> dict[str, str]:
     env = os.environ.copy()
-    configured_home = (config or {}).get("codex", {}).get("project_local_home", "./.codex")
+    configured_home = provider_runtime_setting(
+        config or {}, "codex", "project_local_home", "./.codex"
+    )
     local_home = resolve_project_path(configured_home)
     local_home.mkdir(parents=True, exist_ok=True)
     env["CODEX_HOME"] = str(local_home)

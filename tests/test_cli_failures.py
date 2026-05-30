@@ -24,7 +24,9 @@ def _member(name: str = "Aurelia") -> Member:
 class CliFailureHandlingTests(unittest.IsolatedAsyncioTestCase):
     async def test_member_retry_succeeds_after_retryable_failure(self) -> None:
         member = _member()
-        config = {"codex": {"retries": 2, "retry_base_delay_seconds": 0}}
+        config = {
+            "model_providers": {"codex": {"retries": 2, "retry_base_delay_seconds": 0}}
+        }
         result = object()
         failure = CodexRunError(
             "temporary failure",
@@ -51,7 +53,9 @@ class CliFailureHandlingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_usage_limit_failure_is_not_retried(self) -> None:
         member = _member()
-        config = {"codex": {"retries": 2, "retry_base_delay_seconds": 0}}
+        config = {
+            "model_providers": {"codex": {"retries": 2, "retry_base_delay_seconds": 0}}
+        }
         failure = CodexUsageLimitError(
             "Codex usage limit reached while running Aurelia in research.",
             member_name=member.name,
@@ -77,7 +81,9 @@ class CliFailureHandlingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_retryable_failure_aborts_after_configured_retries(self) -> None:
         member = _member()
-        config = {"codex": {"retries": 1, "retry_base_delay_seconds": 0}}
+        config = {
+            "model_providers": {"codex": {"retries": 1, "retry_base_delay_seconds": 0}}
+        }
         failure = CodexRunError(
             "temporary failure",
             member_name=member.name,
@@ -101,6 +107,32 @@ class CliFailureHandlingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(1, sleep.await_count)
         self.assertIn("retrying (1/2)", secretary.stream.getvalue())
         self.assertIn("Aurelia failed vote: temporary failure", secretary.stream.getvalue())
+
+    async def test_retry_config_falls_back_to_legacy_codex_block(self) -> None:
+        member = _member()
+        config = {"codex": {"retries": 1, "retry_base_delay_seconds": 0}}
+        result = object()
+        failure = CodexRunError(
+            "temporary failure",
+            member_name=member.name,
+            phase="research",
+            log_path=Path("runtime/logs/research-aurelia.log"),
+            retryable=True,
+        )
+        secretary = LocalSecretary(io.StringIO())
+        await secretary.start("Pick dinner")
+
+        with (
+            patch.object(cli, "run_member", new=AsyncMock(side_effect=[failure, result])) as run,
+            patch.object(cli.asyncio, "sleep", new=AsyncMock()) as sleep,
+        ):
+            actual = await cli._run_member_with_retries(
+                config, member, "prompt", Path("schema.json"), "research", False, secretary
+            )
+
+        self.assertIs(actual, result)
+        self.assertEqual(2, run.await_count)
+        self.assertEqual(1, sleep.await_count)
 
     async def test_president_tie_break_returns_valid_canonical_vote(self) -> None:
         president = _member("Bram")

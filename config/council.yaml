@@ -46,6 +46,9 @@ model_providers:
       - gpt-5.2
     max_parameters: null
     allow_unknown_size_models: true
+    project_local_home: ./.codex
+    retries: 2
+    retry_base_delay_seconds: 1.0
     options:
       reasoning_effort: medium
   ollama:
@@ -142,12 +145,6 @@ personality_pool:
   - old-school traditionalist
   - optimization obsessed
   - emotionally intuitive
-
-codex:
-  temperature: null
-  project_local_home: ./.codex
-  retries: 2
-  retry_base_delay_seconds: 1.0
 
 storage:
   council_state_path: ./storage/council-state.json
