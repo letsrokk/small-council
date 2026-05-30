@@ -155,6 +155,156 @@ class StateAssignmentTests(unittest.TestCase):
         self.assertEqual("ollama", updated[0].provider)
         self.assertEqual("qwen3:8b", updated[0].model)
 
+    def test_unavailable_member_model_is_repaired(self) -> None:
+        config = _config()
+        members = [
+            Member(
+                "Aurelia",
+                "missing",
+                "practical",
+                True,
+                "created",
+                total_proposals=3,
+                total_wins=2,
+                total_votes_cast=5,
+                tie_break_victories=1,
+                provider="ollama",
+            ),
+            Member("Bram", "gpt-5.5", "skeptical", False, "now", provider="codex"),
+        ]
+
+        with patch.object(
+            state,
+            "effective_model_pool",
+            return_value=[
+                ModelInfo("codex", "gpt-5.5"),
+                ModelInfo("ollama", "qwen3:8b"),
+            ],
+        ):
+            updated = state._repair_unavailable_member_models(config, members)
+
+        repaired = updated[0]
+        self.assertEqual("ollama", repaired.provider)
+        self.assertEqual("qwen3:8b", repaired.model)
+        self.assertEqual("Aurelia", repaired.name)
+        self.assertEqual("practical", repaired.personality)
+        self.assertTrue(repaired.is_president)
+        self.assertEqual("created", repaired.created_at)
+        self.assertEqual(3, repaired.total_proposals)
+        self.assertEqual(2, repaired.total_wins)
+        self.assertEqual(5, repaired.total_votes_cast)
+        self.assertEqual(1, repaired.tie_break_victories)
+        self.assertIs(updated[1], members[1])
+
+    def test_valid_member_models_are_not_changed(self) -> None:
+        config = _config()
+        members = [
+            Member("Aurelia", "gpt-5.5", "practical", False, "now", provider="codex"),
+            Member("Bram", "qwen3:8b", "skeptical", True, "now", provider="ollama"),
+        ]
+
+        with patch.object(
+            state,
+            "effective_model_pool",
+            return_value=[
+                ModelInfo("codex", "gpt-5.5"),
+                ModelInfo("ollama", "qwen3:8b"),
+            ],
+        ):
+            updated = state._repair_unavailable_member_models(config, members)
+
+        self.assertEqual(members, updated)
+
+    def test_multiple_unavailable_models_prefer_unique_replacements(self) -> None:
+        config = _config()
+        members = [
+            Member("Aurelia", "missing-a", "practical", False, "now", provider="codex"),
+            Member("Bram", "missing-b", "skeptical", True, "now", provider="ollama"),
+            Member("Cato", "gpt-5.5", "direct", False, "now", provider="codex"),
+        ]
+
+        with patch.object(
+            state,
+            "effective_model_pool",
+            return_value=[
+                ModelInfo("codex", "gpt-5.5"),
+                ModelInfo("ollama", "qwen3:8b"),
+                ModelInfo("ollama", "llama3.2:3b"),
+            ],
+        ):
+            updated = state._repair_unavailable_member_models(config, members)
+
+        repaired_pairs = {
+            (updated[0].provider, updated[0].model),
+            (updated[1].provider, updated[1].model),
+        }
+        self.assertEqual(
+            {("ollama", "qwen3:8b"), ("ollama", "llama3.2:3b")},
+            repaired_pairs,
+        )
+        self.assertEqual(("codex", "gpt-5.5"), (updated[2].provider, updated[2].model))
+
+    def test_repair_allows_duplicates_when_unique_models_are_exhausted(self) -> None:
+        config = _config()
+        members = [
+            Member("Aurelia", "missing-a", "practical", False, "now", provider="codex"),
+            Member("Bram", "missing-b", "skeptical", True, "now", provider="ollama"),
+        ]
+
+        with patch.object(
+            state,
+            "effective_model_pool",
+            return_value=[ModelInfo("ollama", "qwen3:8b")],
+        ):
+            updated = state._repair_unavailable_member_models(config, members)
+
+        self.assertEqual(
+            [("ollama", "qwen3:8b"), ("ollama", "qwen3:8b")],
+            [(member.provider, member.model) for member in updated],
+        )
+
+    def test_repair_rejects_duplicates_when_disabled(self) -> None:
+        config = _config()
+        config["model_assignment"]["allow_duplicates_when_needed"] = False
+        members = [
+            Member("Aurelia", "missing-a", "practical", False, "now", provider="codex"),
+            Member("Bram", "missing-b", "skeptical", True, "now", provider="ollama"),
+        ]
+
+        with (
+            patch.object(
+                state,
+                "effective_model_pool",
+                return_value=[ModelInfo("ollama", "qwen3:8b")],
+            ),
+            self.assertRaises(ValueError),
+        ):
+            state._repair_unavailable_member_models(config, members)
+
+    def test_legacy_member_is_repaired_when_codex_model_is_unavailable(self) -> None:
+        config = _config()
+        members = [
+            Member.from_dict(
+                {
+                    "name": "Aurelia",
+                    "model": "missing-codex",
+                    "personality": "practical",
+                    "is_president": False,
+                    "created_at": "now",
+                }
+            )
+        ]
+
+        with patch.object(
+            state,
+            "effective_model_pool",
+            return_value=[ModelInfo("ollama", "qwen3:8b")],
+        ):
+            updated = state._repair_unavailable_member_models(config, members)
+
+        self.assertEqual("ollama", updated[0].provider)
+        self.assertEqual("qwen3:8b", updated[0].model)
+
 
 class ConfigSetTests(unittest.TestCase):
     def test_set_updates_secretary_provider(self) -> None:

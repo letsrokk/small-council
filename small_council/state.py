@@ -51,6 +51,7 @@ def ensure_state(config: dict[str, Any], reset: bool = False) -> list[Member]:
     payload = read_json(state_path, default=None)
     if payload and payload.get("members"):
         members = [Member.from_dict(item) for item in payload["members"]]
+        members = _repair_unavailable_member_models(config, members)
         persist_members(config, members)
         write_agent_files(members)
         return members
@@ -245,6 +246,44 @@ def _next_models(
     return _draw_models(config, members, names, rng)
 
 
+def _repair_unavailable_member_models(config: dict[str, Any], members: list[Member]) -> list[Member]:
+    pool = effective_model_pool(config)
+    if not pool:
+        raise ValueError("No enabled models are available from configured providers.")
+
+    valid_members: list[Member] = []
+    stale_members: list[Member] = []
+    for member in members:
+        if _pool_contains(pool, ModelInfo(member.provider, member.model)):
+            valid_members.append(member)
+        else:
+            stale_members.append(member)
+
+    if not stale_members:
+        return members
+
+    rng = random.SystemRandom()
+    models = _draw_models_from_pool(
+        config,
+        pool,
+        valid_members,
+        [member.name for member in stale_members],
+        rng,
+    )
+    models_by_name = dict(zip((member.name for member in stale_members), models))
+    repaired: list[Member] = []
+    for member in members:
+        model = models_by_name.get(member.name)
+        if model is None:
+            repaired.append(member)
+            continue
+        data = member.to_dict()
+        data["provider"] = model.provider
+        data["model"] = model.model
+        repaired.append(Member.from_dict(data))
+    return repaired
+
+
 def _draw_models(
     config: dict[str, Any],
     members: list[Member],
@@ -254,6 +293,16 @@ def _draw_models(
     pool = effective_model_pool(config)
     if not pool:
         raise ValueError("No enabled models are available from configured providers.")
+    return _draw_models_from_pool(config, pool, members, names, rng)
+
+
+def _draw_models_from_pool(
+    config: dict[str, Any],
+    pool: list[ModelInfo],
+    members: list[Member],
+    names: list[str],
+    rng: random.SystemRandom,
+) -> list[ModelInfo]:
     selected_by_name: dict[str, ModelInfo] = {}
     remaining_names: list[str] = []
     used = {(member.provider, member.model) for member in members}
