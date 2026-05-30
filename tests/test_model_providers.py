@@ -6,11 +6,13 @@ from unittest.mock import patch
 
 from small_council import cli, state
 from small_council.codex_runner import CodexProvider, list_codex_models
-from small_council.config import set_config_value
+from small_council.config import load_config, set_config_value
 from small_council.model_providers import (
     ModelInfo,
     effective_models_for_provider,
     infer_parameter_count,
+    provider_config,
+    provider_options,
 )
 from small_council.ollama_runner import OllamaProvider, list_ollama_models
 from small_council.state import Member
@@ -54,6 +56,69 @@ def _config() -> dict:
 
 
 class ProviderConfigTests(unittest.TestCase):
+    def test_default_council_provider_options(self) -> None:
+        config = load_config()
+
+        ollama_options = provider_config(config, "ollama")["options"]
+        codex_options = provider_config(config, "codex")["options"]
+
+        self.assertEqual(0.8, ollama_options["temperature"])
+        self.assertIsNone(ollama_options["seed"])
+        self.assertNotIn("num_ctx", ollama_options)
+        self.assertEqual("medium", codex_options["reasoning_effort"])
+
+    def test_missing_provider_options_fall_back_to_built_in_defaults(self) -> None:
+        config = {"model_providers": {"ollama": {"enabled": True}, "codex": {"enabled": True}}}
+
+        self.assertEqual(
+            {"temperature": 0.8, "seed": None},
+            provider_options(config, "ollama"),
+        )
+        self.assertEqual(
+            {"reasoning_effort": "medium"},
+            provider_options(config, "codex"),
+        )
+
+    def test_benchmark_options_override_provider_and_member_options(self) -> None:
+        config = _config()
+        config["model_providers"]["ollama"]["options"] = {"temperature": 0.9, "seed": 7}
+        config["model_providers"]["codex"]["options"] = {"reasoning_effort": "high"}
+        config["model_overrides"] = {
+            "Aurelia": {
+                "provider": "ollama",
+                "model": "qwen3:8b",
+                "options": {"temperature": 1.0, "seed": 99},
+            },
+            "Bram": {
+                "provider": "codex",
+                "model": "gpt-5.5",
+                "options": {"reasoning_effort": "xhigh"},
+            },
+        }
+
+        with patch.dict("os.environ", {"SMALL_COUNCIL_BENCHMARK": "1"}):
+            ollama_options = provider_options(config, "ollama", "Aurelia")
+            codex_options = provider_options(config, "codex", "Bram")
+
+        self.assertEqual({"temperature": 0.3, "seed": 42}, ollama_options)
+        self.assertEqual({"reasoning_effort": "low"}, codex_options)
+
+    def test_member_options_override_provider_options_outside_benchmark_mode(self) -> None:
+        config = _config()
+        config["model_providers"]["ollama"]["options"] = {"temperature": 0.9, "seed": 7}
+        config["model_overrides"] = {
+            "Aurelia": {
+                "provider": "ollama",
+                "model": "qwen3:8b",
+                "options": {"temperature": 1.0, "seed": 99},
+            }
+        }
+
+        with patch.dict("os.environ", {}, clear=True):
+            options = provider_options(config, "ollama", "Aurelia")
+
+        self.assertEqual({"temperature": 1.0, "seed": 99}, options)
+
     def test_effective_models_apply_size_enabled_and_disabled_filters(self) -> None:
         config = _config()
         config["model_providers"]["ollama"]["enabled_models"] = ["qwen3:8b", "qwen3:14b"]

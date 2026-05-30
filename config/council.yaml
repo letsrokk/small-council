@@ -46,6 +46,8 @@ model_providers:
       - gpt-5.2
     max_parameters: null
     allow_unknown_size_models: true
+    options:
+      reasoning_effort: medium
   ollama:
     enabled: true
     discover_models: false
@@ -77,8 +79,8 @@ model_providers:
     allow_unknown_size_models: false
     request_timeout_seconds: 300
     options:
-      temperature: null
-      num_ctx: null
+      temperature: 0.8
+      seed: null
 
 model_assignment:
   mode: random_on_creation
@@ -142,7 +144,6 @@ personality_pool:
   - emotionally intuitive
 
 codex:
-  reasoning_effort: medium
   temperature: null
   project_local_home: ./.codex
   retries: 2

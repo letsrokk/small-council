@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 import shlex
 import subprocess
@@ -118,6 +119,7 @@ def execute_case(case, council_cmd: str, timeout_seconds: float) -> CouncilExecu
             text=True,
             timeout=timeout_seconds,
             check=False,
+            env=_benchmark_env(),
         )
         duration = time.monotonic() - start
         payload, error = extract_last_valid_json(completed.stdout)
@@ -146,6 +148,12 @@ def execute_case(case, council_cmd: str, timeout_seconds: float) -> CouncilExecu
             json_payload=payload,
             json_error=error or "Command timed out.",
         )
+
+
+def _benchmark_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["SMALL_COUNCIL_BENCHMARK"] = "1"
+    return env
 
 
 def _print_start(args: argparse.Namespace, cases: list, total_runs: int) -> None:

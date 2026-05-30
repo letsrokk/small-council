@@ -42,6 +42,19 @@ Useful options:
 
 The framework captures stdout, stderr, duration, exit code, parsed JSON, validation warnings, deterministic score breakdowns, and report metadata. It continues after individual case failures.
 
+## Benchmark Provider Defaults
+
+Eval runs automatically set benchmark mode for the council subprocess. This
+leaves normal `config/council.yaml` defaults unchanged while forcing
+benchmark-specific provider options:
+
+- Ollama: `temperature: 0.3`, `seed: 42`
+- Codex: `reasoning_effort: low`
+
+Benchmark options take precedence over member overrides and provider defaults,
+so baseline runs, one-tier-up/down model comparisons, and future golden dataset
+evaluations use deterministic settings without per-case configuration.
+
 ## Progress Output
 
 By default, `./eval` prints progress to stdout:

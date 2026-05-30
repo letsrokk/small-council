@@ -65,14 +65,29 @@ Ollama discovery uses `/api/tags` and execution uses `/api/chat`. Configure conn
 
 ```yaml
 model_providers:
+  codex:
+    options:
+      reasoning_effort: medium
   ollama:
     enabled: true
     base_url: http://localhost:11434
     request_timeout_seconds: 300
     options:
-      temperature: null
-      num_ctx: null
+      temperature: 0.8
+      seed: null
 ```
+
+Provider options are resolved in this order, with later layers winning:
+built-in provider defaults, `model_providers.<provider>.options`, member-specific
+`model_overrides.<member>.options`, then benchmark overrides. Supported options:
+
+- `ollama.temperature`: number, default `0.8` for normal council runs.
+- `ollama.seed`: integer or `null`, default `null` for non-deterministic normal runs.
+- `codex.reasoning_effort`: `minimal`, `low`, `medium`, `high`, or `xhigh`; default `medium`.
+
+Benchmark runs launched through `./eval` automatically override these with
+Ollama `temperature: 0.3`, Ollama `seed: 42`, and Codex
+`reasoning_effort: low`.
 
 ## Model Discovery And Filtering
 
@@ -296,6 +311,8 @@ model_overrides:
   Bram:
     provider: ollama
     model: qwen3:8b
+    options:
+      temperature: 0.6
 ```
 
 Legacy Codex-only override syntax still works:

@@ -353,6 +353,18 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual(0, execution.exit_code)
         self.assertEqual("Arrival", execution.json_payload["winning_option"])
 
+    def test_execute_case_enables_benchmark_environment(self) -> None:
+        case = load_suite("evals/cases.yaml")[0]
+        command = (
+            "python -c \"import json, os; "
+            "print(json.dumps({'benchmark': os.environ.get('SMALL_COUNCIL_BENCHMARK')}))\""
+        )
+
+        execution = execute_case(case, command, timeout_seconds=5)
+
+        self.assertEqual(0, execution.exit_code)
+        self.assertEqual("1", execution.json_payload["benchmark"])
+
 
 def _valid_payload() -> dict:
     return {

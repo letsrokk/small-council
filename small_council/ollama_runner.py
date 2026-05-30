@@ -15,6 +15,7 @@ from .model_providers import (
     effective_models_for_provider,
     infer_parameter_count,
     provider_config,
+    provider_options,
 )
 from .state import Member
 
@@ -124,7 +125,7 @@ class OllamaProvider:
         }
         options = {
             key: value
-            for key, value in (self.provider_config.get("options") or {}).items()
+            for key, value in provider_options(self.config, self.name, member.name).items()
             if value is not None
         }
         if options:

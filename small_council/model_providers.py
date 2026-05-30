@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -49,6 +50,11 @@ class ModelProvider(Protocol):
 
 
 DEFAULT_CODEX_MODELS = ["gpt-5.5", "gpt-5.4", "gpt-5.3-codex", "gpt-5.4-mini"]
+CODEX_REASONING_EFFORTS = {"minimal", "low", "medium", "high", "xhigh"}
+BENCHMARK_PROVIDER_OPTIONS: dict[str, dict[str, Any]] = {
+    "codex": {"reasoning_effort": "low"},
+    "ollama": {"temperature": 0.3, "seed": 42},
+}
 
 
 def normalize_provider_config(config: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -64,11 +70,20 @@ def normalize_provider_config(config: dict[str, Any]) -> dict[str, dict[str, Any
         if not isinstance(provider_config, dict):
             continue
         base = normalized.get(str(name), _provider_defaults(str(name)))
+        provider_options = provider_config.get("options")
         base.update(provider_config)
+        if isinstance(provider_options, dict):
+            options = dict(_provider_defaults(str(name)).get("options") or {})
+            options.update(provider_options)
+            base["options"] = _validate_provider_options(str(name), options)
         normalized[str(name)] = base
 
     if not normalized["codex"].get("static_models"):
         normalized["codex"]["static_models"] = DEFAULT_CODEX_MODELS[:]
+    for name, provider_config in normalized.items():
+        provider_config["options"] = _validate_provider_options(
+            name, provider_config.get("options") or {}
+        )
 
     return normalized
 
@@ -90,14 +105,102 @@ def _provider_defaults(name: str) -> dict[str, Any]:
                 "base_url": "http://localhost:11434",
                 "request_timeout_seconds": 300,
                 "allow_unknown_size_models": False,
-                "options": {"temperature": None, "num_ctx": None},
+                "options": {"temperature": 0.8, "seed": None},
             }
         )
+    if name == "codex":
+        defaults["options"] = {"reasoning_effort": "medium"}
     return defaults
 
 
 def provider_config(config: dict[str, Any], provider: str) -> dict[str, Any]:
     return normalize_provider_config(config).get(provider, _provider_defaults(provider))
+
+
+def provider_options(
+    config: dict[str, Any],
+    provider: str,
+    member_name: str | None = None,
+) -> dict[str, Any]:
+    options = dict(provider_config(config, provider).get("options") or {})
+    legacy_codex = config.get("codex", {}) if provider == "codex" else {}
+    if (
+        isinstance(legacy_codex, dict)
+        and "reasoning_effort" in legacy_codex
+        and not _has_configured_provider_option(config, "codex", "reasoning_effort")
+    ):
+        options["reasoning_effort"] = legacy_codex["reasoning_effort"]
+    member_options = _member_provider_options(config, provider, member_name)
+    if member_options:
+        options.update(member_options)
+    if benchmark_mode_enabled(config):
+        options.update(BENCHMARK_PROVIDER_OPTIONS.get(provider, {}))
+    return _validate_provider_options(provider, options)
+
+
+def benchmark_mode_enabled(config: dict[str, Any]) -> bool:
+    benchmark_config = config.get("benchmark")
+    if isinstance(benchmark_config, dict) and benchmark_config.get("enabled") is True:
+        return True
+    return os.environ.get("SMALL_COUNCIL_BENCHMARK", "").lower() in {"1", "true", "yes", "on"}
+
+
+def _has_configured_provider_option(config: dict[str, Any], provider: str, option: str) -> bool:
+    providers = config.get("model_providers")
+    if not isinstance(providers, dict):
+        return False
+    provider_config = providers.get(provider)
+    if not isinstance(provider_config, dict):
+        return False
+    options = provider_config.get("options")
+    return isinstance(options, dict) and option in options
+
+
+def _member_provider_options(
+    config: dict[str, Any], provider: str, member_name: str | None
+) -> dict[str, Any]:
+    if not member_name:
+        return {}
+    overrides = config.get("model_overrides") or {}
+    if not isinstance(overrides, dict):
+        return {}
+    raw = overrides.get(member_name)
+    if not isinstance(raw, dict):
+        return {}
+    raw_provider = raw.get("provider")
+    if raw_provider is not None and str(raw_provider) != provider:
+        return {}
+    options = raw.get("options")
+    return dict(options) if isinstance(options, dict) else {}
+
+
+def _validate_provider_options(provider: str, options: dict[str, Any]) -> dict[str, Any]:
+    if provider == "ollama":
+        validated: dict[str, Any] = {}
+        if "temperature" in options:
+            temperature = options["temperature"]
+            if temperature is not None and (
+                isinstance(temperature, bool) or not isinstance(temperature, (int, float))
+            ):
+                raise ValueError(
+                    "model_providers.ollama.options.temperature must be a number or null."
+                )
+            validated["temperature"] = float(temperature) if temperature is not None else None
+        if "seed" in options:
+            seed = options["seed"]
+            if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
+                raise ValueError("model_providers.ollama.options.seed must be an integer or null.")
+            validated["seed"] = seed
+        return validated
+    if provider == "codex":
+        effort = str(options.get("reasoning_effort", "medium"))
+        if effort not in CODEX_REASONING_EFFORTS:
+            allowed = ", ".join(sorted(CODEX_REASONING_EFFORTS))
+            raise ValueError(
+                f"model_providers.codex.options.reasoning_effort must be one of: {allowed}."
+            )
+        return {"reasoning_effort": effort}
+    return dict(options)
 
 
 def static_model_infos(provider: str, config: dict[str, Any]) -> list[ModelInfo]:

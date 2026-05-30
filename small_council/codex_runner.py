@@ -17,6 +17,7 @@ from .model_providers import (
     codex_catalog_models,
     effective_models_for_provider,
     provider_config,
+    provider_options,
 )
 from .state import Member
 
@@ -138,6 +139,7 @@ async def run_member(
     output_path = runtime_temp / f"{phase}-{member.name.lower()}-last.json"
     log_path = runtime_logs / f"{phase}-{member.name.lower()}.log"
 
+    reasoning_effort = provider_options(config, "codex", member.name)["reasoning_effort"]
     args = [
         codex,
         "--sandbox",
@@ -149,7 +151,7 @@ async def run_member(
         "-m",
         member.model,
         "-c",
-        f"model_reasoning_effort={json.dumps(config.get('codex', {}).get('reasoning_effort', 'medium'))}",
+        f"model_reasoning_effort={json.dumps(reasoning_effort)}",
     ]
     if web_search:
         args.append("--search")
