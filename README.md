@@ -116,7 +116,3 @@ model_overrides:
 ```
 
 Overrides must stay inside `model_pool`.
-
-## Model Pool Note
-
-The requested `gpt-5.1-codex-mini` model was not present in the Codex CLI 0.134.0 model catalog available in this workspace. The default pool uses `gpt-5.4-mini`, which is exposed by this Codex installation.
