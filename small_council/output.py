@@ -57,6 +57,24 @@ class MemberViewState:
             del self.events[:-limit]
 
 
+@dataclass(frozen=True)
+class MemberRange:
+    start: int
+    end: int
+    full_count: int
+    has_partial: bool = False
+
+    @property
+    def full_end(self) -> int:
+        return self.start + self.full_count
+
+    @property
+    def partial_index(self) -> int | None:
+        if not self.has_partial:
+            return None
+        return self.end - 1
+
+
 @dataclass
 class MemberViewport:
     total_count: int = 0
@@ -133,6 +151,9 @@ class MemberViewport:
 
 
 class BaseRenderer:
+    suppresses_final_stdout = False
+    _secretary_history_limit = 100
+
     def __init__(self, stdout: TextIO | None = None, stderr: TextIO | None = None) -> None:
         self.stdout = stdout or sys.stdout
         self.stderr = stderr or sys.stderr
@@ -144,6 +165,14 @@ class BaseRenderer:
 
     def start_run(self, context: RunContext) -> None:
         self.context = context
+
+    def seed_members(self, members: list[Any]) -> None:
+        for member in members:
+            state = self._member_state.setdefault(member.name, MemberViewState(name=member.name))
+            state.role = "President" if member.is_president else "Member"
+            state.model = str(member.model)
+            state.status = "queued"
+            state.phase = "starting"
 
     def update_phase(self, phase: str) -> None:
         if self.context:
@@ -157,10 +186,9 @@ class BaseRenderer:
         lines = [line.rstrip() for line in str(message).splitlines() if line.strip()]
         if not lines:
             return
-        self._secretary_history.append(f"[{timestamp}] {lines[0]}")
+        self._add_secretary_line(f"[{timestamp}] {lines[0]}")
         for line in lines[1:]:
-            self._secretary_history.append(line)
-        self._secretary_history = self._secretary_history[-10:]
+            self._add_secretary_line(line)
         self._render_secretary_message(timestamp, lines)
 
     def member_event(
@@ -226,7 +254,7 @@ class BaseRenderer:
 
     def _add_secretary_line(self, line: str) -> None:
         self._secretary_history.append(line)
-        self._secretary_history = self._secretary_history[-10:]
+        self._secretary_history = self._secretary_history[-self._secretary_history_limit:]
 
     def _render_secretary_message(self, timestamp: str, lines: list[str]) -> None:
         raise NotImplementedError
@@ -272,6 +300,10 @@ class PlainRenderer(BaseRenderer):
     def _render_member_status(self, member_name: str, status: str) -> None:
         return None
 
+    def final_decision(self, payload: dict[str, Any]) -> None:
+        super().final_decision(payload)
+        self.secretary_message("\n".join(final_decision_announcement_lines(payload)))
+
     def render_members(self, members: list[Any]) -> None:
         print(render_members_text(members), file=self.stdout)
 
@@ -280,6 +312,7 @@ class PlainRenderer(BaseRenderer):
 
 
 class RichRenderer(BaseRenderer):
+    suppresses_final_stdout = True
     _refresh_interval = 0.08
 
     def __init__(
@@ -301,7 +334,9 @@ class RichRenderer(BaseRenderer):
         self._keyboard_stop = threading.Event()
         self._stdin_fd: int | None = None
         self._stdin_termios: list[Any] | None = None
-        self._keyboard_controls = "Keys: Up/Down move, PgUp/PgDn page, Home/End jump"
+        self._keyboard_controls = "Keys: Left/Right switch, Up/Down scroll, Esc/Enter close at end"
+        self._active_section = "members"
+        self._secretary_scroll_offset = 0
         self._last_refresh_at = 0.0
         self._refresh_pending = False
         self._awaiting_final_key = False
@@ -361,6 +396,10 @@ class RichRenderer(BaseRenderer):
         super().member_status(member_name, status)
         self._request_refresh()
 
+    def seed_members(self, members: list[Any]) -> None:
+        super().seed_members(members)
+        self._request_refresh(force=True)
+
     def render_members(self, members: list[Any]) -> None:
         rich = self._rich or _load_rich()
         if self._console is None:
@@ -377,13 +416,9 @@ class RichRenderer(BaseRenderer):
 
     def final_decision(self, payload: dict[str, Any]) -> None:
         super().final_decision(payload)
-        final_output = render_human_decision(payload).strip()
-        if final_output:
-            final_lines = [line.strip() for line in final_output.splitlines() if line.strip()]
-            self._add_secretary_line(f"Final decision: {final_lines[0]}")
-            for line in final_lines[1:]:
-                self._add_secretary_line(line)
-        self._add_secretary_line("Press any key to close.")
+        for line in final_decision_announcement_lines(payload):
+            self._add_secretary_line(line)
+        self._add_secretary_line("Press Esc or Enter to close.")
         self._awaiting_final_key = True
         self._final_key_pressed.clear()
         self._request_refresh(force=True)
@@ -415,6 +450,15 @@ class RichRenderer(BaseRenderer):
                 self._refresh_pending = False
             else:
                 self._refresh_pending = True
+
+    def _add_secretary_line(self, line: str) -> None:
+        was_scrolled = self._secretary_scroll_offset > 0
+        super()._add_secretary_line(line)
+        if was_scrolled:
+            self._secretary_scroll_offset += self._wrapped_line_count(
+                line, self._secretary_content_width()
+            )
+        self._clamp_secretary_scroll()
 
     def _render(self):
         rich = self._rich or _load_rich()
@@ -458,23 +502,30 @@ class RichRenderer(BaseRenderer):
         rich = self._rich or _load_rich()
         body = rich.text.Text()
         width = self._secretary_content_width()
+        content_height = self._secretary_content_height()
+        used_lines = 1
         body.append("Secretary\n", style="bold")
         if self.context is not None:
             self._append_wrapped(body, f"Phase: {self.context.phase}", width, style="dim")
+            used_lines += self._wrapped_line_count(f"Phase: {self.context.phase}", width)
         if self._secretary_history:
-            for line in self._secretary_history[-8:]:
-                self._append_wrapped(body, line, width)
+            history_budget = max(1, content_height - used_lines)
+            for line in self._visible_secretary_history_lines(width, history_budget):
+                body.append(f"{line}\n")
         else:
             body.append("Waiting for updates...")
-        return rich.panel.Panel(body, border_style="magenta", padding=(0, 1))
+        border = "yellow" if self._active_section == "secretary" else "magenta"
+        title = "Secretary active" if self._active_section == "secretary" else None
+        return rich.panel.Panel(body, border_style=border, title=title, padding=(0, 1))
 
     def _render_member_stack(self):
         rich = self._rich or _load_rich()
         members = self._ordered_members()
         self._viewport.set_total_count(len(members))
         card_budget = self._member_card_budget()
-        start, end = self._visible_member_range(members, card_budget)
-        window_size = max(1, end - start)
+        member_range = self._visible_member_window(members, card_budget)
+        start, end = member_range.start, member_range.end
+        window_size = max(1, member_range.full_count)
         self._viewport.window_size = window_size
         visible = members[start:end]
         cards: list[Any] = []
@@ -489,7 +540,9 @@ class RichRenderer(BaseRenderer):
             cards.append(self._render_member_card(state, focused=(offset == self._viewport.focus_index)))
         if not visible and not members:
             cards.append(rich.panel.Panel("Waiting for council members...", border_style="green"))
-        return rich.panel.Panel(rich.console.Group(*cards), border_style="green", padding=(0, 1))
+        border = "yellow" if self._active_section == "members" else "green"
+        title = "Members active" if self._active_section == "members" else None
+        return rich.panel.Panel(rich.console.Group(*cards), border_style=border, title=title, padding=(0, 1))
 
     def _render_member_card(self, state: MemberViewState, focused: bool = False):
         rich = self._rich or _load_rich()
@@ -553,41 +606,64 @@ class RichRenderer(BaseRenderer):
         return max(1, self._member_stack_height() - 3)
 
     def _visible_member_range(self, members: list[MemberViewState], card_budget: int) -> tuple[int, int]:
+        member_range = self._visible_member_window(members, card_budget)
+        return member_range.start, member_range.end
+
+    def _visible_member_window(self, members: list[MemberViewState], card_budget: int) -> MemberRange:
         if not members:
-            return 0, 0
+            return MemberRange(0, 0, 1)
         self._viewport.set_total_count(len(members))
         self._viewport._clamp_top()
         start = self._viewport.top_index
         if self._viewport.focus_index < start:
             start = self._viewport.focus_index
 
-        end = self._fit_members_from(start, members, card_budget)
-        while self._viewport.focus_index >= end and start < self._viewport.focus_index:
+        member_range = self._fit_members_from(start, members, card_budget)
+        while (
+            not self._member_range_fully_contains_focus(member_range)
+            and start < self._viewport.focus_index
+        ):
             start += 1
-            end = self._fit_members_from(start, members, card_budget)
+            member_range = self._fit_members_from(start, members, card_budget)
 
         max_start = self._last_scroll_start(members, card_budget)
         start = min(start, max_start)
         if self._viewport.focus_index < start:
             start = self._viewport.focus_index
-        end = self._fit_members_from(start, members, card_budget)
+        member_range = self._fit_members_from(start, members, card_budget)
+        while (
+            not self._member_range_fully_contains_focus(member_range)
+            and start < self._viewport.focus_index
+        ):
+            start += 1
+            member_range = self._fit_members_from(start, members, card_budget)
         self._viewport.top_index = start
-        return start, end
+        return member_range
+
+    def _member_range_fully_contains_focus(self, member_range: MemberRange) -> bool:
+        return member_range.start <= self._viewport.focus_index < member_range.full_end
 
     def _fit_members_from(
         self, start: int, members: list[MemberViewState], card_budget: int
-    ) -> int:
+    ) -> MemberRange:
         used = 0
         end = start
+        full_count = 0
+        has_partial = False
         for state in members[start:]:
             height = self._estimated_member_card_height(state)
             if end > start and used + height > card_budget:
+                if used < card_budget:
+                    end += 1
+                    has_partial = True
                 break
             used += height
             end += 1
+            full_count += 1
             if used >= card_budget:
                 break
-        return max(start + 1, end)
+        end = max(start + 1, end)
+        return MemberRange(start, end, max(1, full_count), has_partial)
 
     def _last_scroll_start(self, members: list[MemberViewState], card_budget: int) -> int:
         used = 0
@@ -595,6 +671,8 @@ class RichRenderer(BaseRenderer):
         for index in range(len(members) - 1, -1, -1):
             height = self._estimated_member_card_height(members[index])
             if index < len(members) - 1 and used + height > card_budget:
+                if used < card_budget:
+                    start = index
                 break
             used += height
             start = index
@@ -630,6 +708,57 @@ class RichRenderer(BaseRenderer):
         if self._should_stack_vertically():
             return self._terminal_width() - 6
         return self._left_column_width() - 4
+
+    def _secretary_content_height(self) -> int:
+        if self._should_stack_vertically():
+            panel_height = 9
+        else:
+            panel_height = self._body_height()
+        return max(1, panel_height - 2)
+
+    def _visible_secretary_history_lines(self, width: int, max_lines: int) -> list[str]:
+        visual_lines = self._secretary_visual_lines(width)
+        if not visual_lines:
+            return []
+        max_lines = max(1, int(max_lines))
+        max_offset = max(0, len(visual_lines) - max_lines)
+        offset = max(0, min(self._secretary_scroll_offset, max_offset))
+        self._secretary_scroll_offset = offset
+        end = len(visual_lines) - offset
+        start = max(0, end - max_lines)
+        return visual_lines[start:end]
+
+    def _secretary_visual_lines(self, width: int) -> list[str]:
+        visual_lines: list[str] = []
+        for line in self._secretary_history:
+            visual_lines.extend(self._wrap_line(line, width))
+        return visual_lines
+
+    def _secretary_history_budget(self) -> int:
+        width = self._secretary_content_width()
+        used_lines = 1
+        if self.context is not None:
+            used_lines += self._wrapped_line_count(f"Phase: {self.context.phase}", width)
+        return max(1, self._secretary_content_height() - used_lines)
+
+    def _max_secretary_scroll_offset(self) -> int:
+        return max(
+            0,
+            len(self._secretary_visual_lines(self._secretary_content_width()))
+            - self._secretary_history_budget(),
+        )
+
+    def _clamp_secretary_scroll(self) -> None:
+        self._secretary_scroll_offset = max(
+            0, min(self._secretary_scroll_offset, self._max_secretary_scroll_offset())
+        )
+
+    def _scroll_secretary(self, delta: int) -> bool:
+        previous = self._secretary_scroll_offset
+        self._secretary_scroll_offset = max(
+            0, min(self._secretary_scroll_offset + int(delta), self._max_secretary_scroll_offset())
+        )
+        return self._secretary_scroll_offset != previous
 
     def _member_card_content_width(self) -> int:
         width = self._terminal_width()
@@ -714,11 +843,10 @@ class RichRenderer(BaseRenderer):
                 break
             if not chunk:
                 continue
-            if self._awaiting_final_key:
-                self._final_key_pressed.set()
-                break
             if self._handle_key_chunk(chunk):
                 self._request_refresh()
+            if self._awaiting_final_key and self._final_key_pressed.is_set():
+                break
 
     def _wait_for_final_key(self) -> None:
         if not self._awaiting_final_key:
@@ -742,19 +870,48 @@ class RichRenderer(BaseRenderer):
                 continue
             action, consumed = key
             index += consumed
-            if action == "up":
-                changed = self._viewport.move_focus(-1) or changed
+            if action == "exit":
+                if self._awaiting_final_key:
+                    self._final_key_pressed.set()
+                continue
+            if action == "left":
+                changed = self._set_active_section("secretary") or changed
+            elif action == "right":
+                changed = self._set_active_section("members") or changed
+            elif action == "up":
+                changed = self._scroll_active_section(-1) or changed
             elif action == "down":
-                changed = self._viewport.move_focus(1) or changed
-            elif action == "page_up":
-                changed = self._viewport.jump(-1) or changed
-            elif action == "page_down":
-                changed = self._viewport.jump(1) or changed
-            elif action == "home":
+                changed = self._scroll_active_section(1) or changed
+            elif self._active_section == "members" and action in {"page_up", "home"}:
                 changed = self._viewport.go_home() or changed
-            elif action == "end":
+            elif self._active_section == "members" and action in {"page_down", "end"}:
                 changed = self._viewport.go_end() or changed
+            elif self._active_section == "secretary" and action in {"page_up", "home"}:
+                changed = self._jump_secretary_to_start() or changed
+            elif self._active_section == "secretary" and action in {"page_down", "end"}:
+                changed = self._jump_secretary_to_end() or changed
         return changed
+
+    def _set_active_section(self, section: str) -> bool:
+        if section == self._active_section:
+            return False
+        self._active_section = section
+        return True
+
+    def _scroll_active_section(self, delta: int) -> bool:
+        if self._active_section == "secretary":
+            return self._scroll_secretary(-delta)
+        return self._viewport.move_focus(delta)
+
+    def _jump_secretary_to_start(self) -> bool:
+        previous = self._secretary_scroll_offset
+        self._secretary_scroll_offset = self._max_secretary_scroll_offset()
+        return self._secretary_scroll_offset != previous
+
+    def _jump_secretary_to_end(self) -> bool:
+        previous = self._secretary_scroll_offset
+        self._secretary_scroll_offset = 0
+        return self._secretary_scroll_offset != previous
 
     def _next_key(self, text: str, index: int) -> tuple[str, int] | None:
         chunk = text[index:]
@@ -764,6 +921,10 @@ class RichRenderer(BaseRenderer):
             return "up", 3
         if chunk.startswith("\x1b[B"):
             return "down", 3
+        if chunk.startswith("\x1b[C"):
+            return "right", 3
+        if chunk.startswith("\x1b[D"):
+            return "left", 3
         if chunk.startswith("\x1b[5~"):
             return "page_up", 4
         if chunk.startswith("\x1b[6~"):
@@ -773,6 +934,10 @@ class RichRenderer(BaseRenderer):
         if chunk.startswith("\x1b[F"):
             return "end", 3
         char = chunk[0]
+        if char == "\x1b":
+            return "exit", 1
+        if char in {"\r", "\n"}:
+            return "exit", 1
         if char in {"k", "K"}:
             return "up", 1
         if char in {"j", "J"}:
@@ -854,23 +1019,25 @@ def select_renderer(
         return None
     stdout = stdout or sys.stdout
     stderr = stderr or sys.stderr
-    stdin = stdin or sys.stdin
     if getattr(args, "plain_output", False):
         return PlainRenderer(stdout=stdout, stderr=stderr)
-    if getattr(args, "rich_output", False):
+    try:
         rich = _load_rich()
-        return RichRenderer(stdout=stdout, stderr=stderr, rich_module=rich, force_terminal=True)
-    if _can_use_rich(stdin, stdout, stderr):
-        try:
-            rich = _load_rich()
-        except RuntimeError:
-            return PlainRenderer(stdout=stdout, stderr=stderr)
-        return RichRenderer(stdout=stdout, stderr=stderr, rich_module=rich)
-    return PlainRenderer(stdout=stdout, stderr=stderr)
+    except RuntimeError:
+        return PlainRenderer(stdout=stdout, stderr=stderr)
+    return RichRenderer(stdout=stdout, stderr=stderr, rich_module=rich, force_terminal=True)
 
 
 def render_human_decision(payload: dict[str, Any]) -> str:
     return str(payload["final_output"]).rstrip()
+
+
+def final_decision_announcement_lines(payload: dict[str, Any]) -> list[str]:
+    final_output = render_human_decision(payload).strip()
+    if not final_output:
+        return ["Final decision complete."]
+    final_lines = [line.strip() for line in final_output.splitlines() if line.strip()]
+    return [f"Final decision: {final_lines[0]}", *final_lines[1:]]
 
 
 def render_json_decision(payload: dict[str, Any]) -> str:
@@ -948,12 +1115,6 @@ def _format_table(
     separator = "-+-".join("-" * widths[header] for header in headers)
     body = [render_row(row) for row in rendered_rows]
     return "\n".join([header_row, separator, *body])
-
-
-def _can_use_rich(stdin: TextIO, stdout: TextIO, stderr: TextIO) -> bool:
-    return bool(getattr(stdin, "isatty", lambda: False)()) and bool(
-        getattr(stdout, "isatty", lambda: False)()
-    )
 
 
 def _load_rich():

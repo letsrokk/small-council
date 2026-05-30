@@ -39,9 +39,9 @@ Decision output is human-readable by default. Use JSON when you want a structure
 ./council --json-output "What movie should I watch tonight?"
 ```
 
-The CLI now auto-selects Rich terminal output on interactive TTYs when Rich is installed. Force plain text with `--plain-output`, or force Rich with `--rich-output`.
+The CLI uses Rich TUI output by default for human-readable runs when Rich is installed. Use `--plain-output` for plain text, or `--json-output` for machine-readable JSON. If Rich is unavailable, the CLI falls back to plain text.
 
-In Rich mode, use `Up`/`Down` to move through the stacked member area. `PageUp`/`PageDown` page through the stack, and `Home`/`End` jump to the start or end. Narrow terminals fall back to a vertical layout so the Secretary and members remain readable.
+In Rich mode, use `Left`/`Right` to switch between the Secretary and council member areas. `Up`/`Down` scrolls the active area; `PageUp`/`Home` and `PageDown`/`End` jump to oldest/newest Secretary updates or first/last council member depending on the active area. After the final decision, use `Esc` or `Enter` to close the TUI. Narrow terminals fall back to a vertical layout so the Secretary and members remain readable.
 
 The Secretary prints short immediate progress updates for completed events on stderr, then milestone summaries after the larger council phases: initial proposals, each discussion round, final proposals, proposal grouping, the initial vote, and any runoff votes.
 

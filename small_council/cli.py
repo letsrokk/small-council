@@ -26,7 +26,14 @@ from .decision import (
 )
 from .formatting import render_fallback
 from .memory import append_decision_memory, load_recent_memory
-from .output import BaseRenderer, RunContext, render_leaderboard_text, render_members_text, select_renderer
+from .output import (
+    BaseRenderer,
+    RunContext,
+    final_decision_announcement_lines,
+    render_leaderboard_text,
+    render_members_text,
+    select_renderer,
+)
 from .prompts import (
     discussion_prompt,
     discussion_round_prompt,
@@ -142,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
                     web_search_enabled=not args.no_search,
                 )
             )
-            _seed_renderer_members(renderer, members)
+            renderer.seed_members(members)
         payload = asyncio.run(
             _run_decision(
                 config,
@@ -182,8 +189,10 @@ def main(argv: list[str] | None = None) -> int:
         renderer.final_decision(payload)
         renderer.close()
     if args.json_output:
+        for line in final_decision_announcement_lines(payload):
+            print(line, file=sys.stderr)
         print(render_json_decision(payload))
-    else:
+    elif not (renderer and renderer.suppresses_final_stdout):
         print(render_human_decision(payload))
     return 0
 
@@ -803,21 +812,6 @@ def _ensure_dirs(config: dict) -> None:
                 path.parent.mkdir(parents=True, exist_ok=True)
             else:
                 path.mkdir(parents=True, exist_ok=True)
-
-
-def _seed_renderer_members(renderer: BaseRenderer, members) -> None:
-    for member in members:
-        renderer.member_event(
-            member.name,
-            "member_registered",
-            "",
-            payload={
-                "model": member.model,
-                "role": "President" if member.is_president else "Member",
-                "status": "queued",
-                "phase": "starting",
-            },
-        )
 
 
 def _print_members(members) -> None:
