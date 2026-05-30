@@ -57,28 +57,13 @@ model_providers:
     base_url: http://localhost:11434
     enabled_models:
     disabled_models:
-    # default
     static_models:
-      - deepseek-r1:7b
-      - qwen3:4b
+      - deepseek-r1:8b
+      - qwen3:8b
       - mistral:7b
       - gemma3:4b
-      - llama3.2:3b
-    # Smaller
-    # static_models:
-    #   - deepseek-r1:7b
-    #   - qwen3:4b
-    #   - mistral:7b
-    #   - gemma3:1b
-    #   - llama3.2:1b
-    # Larger
-    # static_models:
-    #   - deepseek-r1:8b
-    #   - qwen3:8b
-    #   - mistral-nemo:12b
-    #   - gemma3:12b
-    #   - llama3.1:8b
-    max_parameters: 8b
+      - llama3.1:8b
+    max_parameters: 8.2b
     allow_unknown_size_models: false
     request_timeout_seconds: 300
     options:
@@ -96,7 +81,7 @@ model_overrides:
 secretary:
   mode: model
   provider: ollama
-  model: qwen3:4b
+  model: gemma3:4b
   verbosity: balanced
 
 search:
