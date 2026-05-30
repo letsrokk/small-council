@@ -26,9 +26,11 @@ runtime/temp/*
 runtime/xdg-cache/
 runtime/xdg-config/
 runtime/xdg-data/
+evals/reports/*
 
 !runtime/logs/.gitkeep
 !runtime/temp/.gitkeep
+!evals/reports/.gitkeep
 
 # Generated persistent agent identities.
 agents/definitions/*
