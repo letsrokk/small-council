@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 
 from .guardrails import guardrail_context
 from .state import Member
@@ -41,6 +42,7 @@ The user asks: {question!r}
 
 Act independently. During research, you can request web searches through the shared Search Worker.
 Use the Search Worker when the decision depends on current, external, or missing information, including availability, local places, movies, products, prices, reviews, news, recent facts, or anything you would otherwise have to guess from memory.
+Use the Search Worker when you lack knowledge, are unsure, or need facts from after your training cutoff, including recent dated events even when the date is in the past.
 Do not invent freshness-sensitive details when search is available.
 Produce one concrete recommendation.
 Your personality should influence priorities, tone, and risk tolerance.
@@ -64,8 +66,11 @@ Council member:
 - Personality: {member.personality}
 
 You are planning any web searches to run through the shared Search Worker before the member answers.
+Current date: {date.today().isoformat()}
 Return only JSON with a queries array.
 Use 1 to 3 concise search queries when the recommendation needs current, external, or missing facts.
+Use 1 to 3 concise search queries when you lack knowledge, are unsure, or the answer depends on facts after your training cutoff.
+Past dates can still require search when they are recent, post-cutoff, or event-specific.
 Use 0 queries only for stable or common-knowledge decisions where web context would not change the answer.
 
 Task prompt:
@@ -105,6 +110,7 @@ def discussion_round_prompt(
     discussion_transcript: list[dict],
     round_number: int,
     total_rounds: int,
+    web_search_enabled: bool = True,
 ) -> str:
     return f"""{BASE_RULES}
 
@@ -115,7 +121,7 @@ Council member:
 - President: {member.is_president}
 
 The user asks: {question!r}
-{guardrail_context(question, web_search_enabled=False)}
+{guardrail_context(question, web_search_enabled=web_search_enabled)}
 
 You are in threaded discussion round {round_number} of {total_rounds}.
 Initial draft recommendations:
@@ -126,6 +132,9 @@ Full discussion transcript so far:
 
 Talk directly to the other members' points. Be concise, practical, and specific.
 You may consult, agree, disagree, or pivot.
+During revision, you can request web searches through the shared Search Worker when your updated recommendation depends on current, external, or missing information.
+Use the Search Worker when you lack knowledge, are unsure, or need facts from after your training cutoff, including recent dated events even when the date is in the past.
+Do not invent freshness-sensitive details when search is available.
 Return:
 - member: your name
 - discussion_reply: a short visible reply to the council

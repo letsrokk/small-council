@@ -143,6 +143,101 @@ class ModelRunnerSearchTests(unittest.IsolatedAsyncioTestCase):
         final_prompt = provider.run.await_args_list[1].args[1]
         self.assertIn("search unavailable: down", final_prompt)
 
+    async def test_empty_search_plan_falls_back_for_post_cutoff_year(self) -> None:
+        member = Member("Aurelia", "qwen3:4b", "practical", False, "now", provider="ollama")
+        provider = SimpleNamespace(run=AsyncMock())
+        provider.run.side_effect = [
+            SimpleNamespace(payload={"queries": []}),
+            SimpleNamespace(payload={"recommendation": "Pick one"}),
+        ]
+        search_provider = FakeSearchProvider()
+
+        with (
+            patch.object(model_runner, "provider_config", return_value={"enabled": True}),
+            patch.object(model_runner, "create_provider", return_value=provider),
+            patch.object(model_runner, "search_enabled", return_value=True),
+            patch.object(
+                model_runner,
+                "create_search_worker",
+                return_value=SearchWorker(_config()["search"], search_provider),
+            ),
+            patch.object(model_runner, "write_search_log"),
+        ):
+            await model_runner.run_member(
+                _config(),
+                member,
+                "The user asks: 'Who won the 2025 Eurovision Song Contest?'",
+                Path("schema.json"),
+                "research",
+                True,
+            )
+
+        self.assertEqual(["Who won the 2025 Eurovision Song Contest?"], search_provider.queries)
+
+    async def test_empty_search_plan_falls_back_for_current_question(self) -> None:
+        member = Member("Aurelia", "qwen3:4b", "practical", False, "now", provider="ollama")
+        provider = SimpleNamespace(run=AsyncMock())
+        provider.run.side_effect = [
+            SimpleNamespace(payload={"queries": []}),
+            SimpleNamespace(payload={"recommendation": "Pick one"}),
+        ]
+        search_provider = FakeSearchProvider()
+
+        with (
+            patch.object(model_runner, "provider_config", return_value={"enabled": True}),
+            patch.object(model_runner, "create_provider", return_value=provider),
+            patch.object(model_runner, "search_enabled", return_value=True),
+            patch.object(
+                model_runner,
+                "create_search_worker",
+                return_value=SearchWorker(_config()["search"], search_provider),
+            ),
+            patch.object(model_runner, "write_search_log"),
+        ):
+            await model_runner.run_member(
+                _config(),
+                member,
+                "The user asks: 'What is the best current phone plan?'",
+                Path("schema.json"),
+                "research",
+                True,
+            )
+
+        self.assertEqual(["What is the best current phone plan?"], search_provider.queries)
+
+    async def test_empty_search_plan_does_not_force_search_for_stable_choice(self) -> None:
+        member = Member("Aurelia", "qwen3:4b", "practical", False, "now", provider="ollama")
+        provider = SimpleNamespace(run=AsyncMock())
+        provider.run.side_effect = [
+            SimpleNamespace(payload={"queries": []}),
+            SimpleNamespace(payload={"recommendation": "Pick one"}),
+        ]
+        search_provider = FakeSearchProvider()
+
+        with (
+            patch.object(model_runner, "provider_config", return_value={"enabled": True}),
+            patch.object(model_runner, "create_provider", return_value=provider),
+            patch.object(model_runner, "search_enabled", return_value=True),
+            patch.object(
+                model_runner,
+                "create_search_worker",
+                return_value=SearchWorker(_config()["search"], search_provider),
+            ),
+            patch.object(model_runner, "write_search_log"),
+        ):
+            await model_runner.run_member(
+                _config(),
+                member,
+                "The user asks: 'What movie should I watch: Alien or Arrival?'",
+                Path("schema.json"),
+                "research",
+                True,
+            )
+
+        self.assertEqual([], search_provider.queries)
+        final_prompt = provider.run.await_args_list[1].args[1]
+        self.assertNotIn("Web search results", final_prompt)
+
     async def test_run_many_shares_one_search_worker(self) -> None:
         members = [
             Member("Aurelia", "qwen3:4b", "practical", False, "now", provider="ollama"),

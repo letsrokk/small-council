@@ -381,10 +381,11 @@ async def _run_decision(
                         discussion_transcript,
                         discussion_round,
                         discussion_round_count,
+                        web_search_enabled=web_search and search_enabled(config),
                     ),
                     discussion_schema,
                     f"discussion-{discussion_round}",
-                    False,
+                    web_search,
                 )
                 for member in members
             ]

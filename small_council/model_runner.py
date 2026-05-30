@@ -135,6 +135,8 @@ async def _planned_queries(
         )
         raw_queries = result.payload.get("queries", [])
         queries = _normalize_queries(raw_queries)
+        if not queries:
+            queries = _fallback_queries(prompt)
         events.append({"status": "planned", "queries": queries})
         return queries
     except Exception as exc:
@@ -170,14 +172,32 @@ def _fallback_queries(prompt: str) -> list[str]:
     question = _question_from_prompt(prompt)
     if not question:
         return []
-    if re.search(
-        r"\b(today|current|latest|recent|now|near me|local|restaurant|movie|news|price|"
-        r"weather|available|product|review|202[0-9])\b",
-        question,
-        flags=re.IGNORECASE,
-    ):
+    if _question_needs_search(question):
         return [question]
     return []
+
+
+def _question_needs_search(question: str) -> bool:
+    text = str(question or "")
+    if not text.strip():
+        return False
+    if re.search(
+        r"\b("
+        r"today|tonight|current|currently|latest|recent|recently|now|near me|local|"
+        r"restaurant|news|price|prices|pricing|weather|available|availability|"
+        r"product|products|review|reviews|released|release|launch|launched|"
+        r"this (?:week|month|year)|last (?:night|week|month|year)|next (?:week|month|year)|"
+        r"yesterday|tomorrow|as of|upcoming|who won|who is the current|what happened to"
+        r")\b",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if re.search(r"\b(?:after|since)\s+20(?:2[4-9]|[3-9][0-9])\b", text, flags=re.IGNORECASE):
+        return True
+    if re.search(r"\b20(?:2[4-9]|[3-9][0-9])\b", text):
+        return True
+    return False
 
 
 def _question_from_prompt(prompt: str) -> str:
