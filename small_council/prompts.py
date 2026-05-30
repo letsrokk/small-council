@@ -167,6 +167,33 @@ Do not introduce a new option. Do not vote for an eliminated option.
 """
 
 
+def president_tie_break_prompt(
+    president: Member,
+    question: str,
+    tied_recommendations: list[dict],
+    vote_rounds: list[dict],
+) -> str:
+    return f"""{BASE_RULES}
+
+You are the President of the Small Council.
+President:
+- Name: {president.name}
+- Personality: {president.personality}
+
+The user asks: {question!r}
+
+All configured runoff rounds have been used and the council is still tied.
+Remaining tied options:
+{json.dumps(tied_recommendations, indent=2)}
+
+Previous vote rounds:
+{json.dumps(vote_rounds, indent=2)}
+
+Break the tie by choosing exactly one remaining tied option.
+Do not abstain. Do not introduce a new option. Explain the deciding reason briefly.
+"""
+
+
 def president_summary_prompt(
     president: Member,
     question: str,
@@ -199,6 +226,7 @@ Leaderboard:
 Write plain human-readable text in final_output, not JSON or a code block.
 Respect the computed winner and votes exactly.
 If status is "resolved", present the winning option normally.
+If tie_broken_by is present, say the President broke the tie after the configured runoff rounds.
 If winning_members has more than one member, mention the shared winning proposers by name.
 If status is "unresolved_tie", do not invent a winner. Say no single winner emerged after the configured runoff rounds and present all remaining tied options as equally viable choices.
 """

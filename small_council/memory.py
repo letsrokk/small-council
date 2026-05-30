@@ -20,6 +20,8 @@ def append_decision_memory(
     winning_member: str | None,
     votes: list[dict[str, Any]],
     final_tied_options: list[str] | None = None,
+    tie_broken_by: str | None = None,
+    tie_break_vote: dict[str, Any] | None = None,
 ) -> None:
     path = _history_path(config)
     payload = read_json(path, {"decisions": []})
@@ -30,17 +32,26 @@ def append_decision_memory(
             "winning_option": winning_option,
             "winning_member": winning_member,
             "final_tied_options": final_tied_options or [],
+            "tie_broken_by": tie_broken_by,
+            "tie_break_vote": _stored_vote(tie_break_vote) if tie_break_vote else None,
             "votes": [
-                {
-                    "voter": vote.get("voter"),
-                    "selected_option": vote.get("selected_option"),
-                    "reason": vote.get("reason"),
-                }
+                _stored_vote(vote)
                 for vote in votes
             ],
         }
     )
     write_json(path, payload)
+
+
+def _stored_vote(vote: dict[str, Any]) -> dict[str, Any]:
+    stored = {
+        "voter": vote.get("voter"),
+        "selected_option": vote.get("selected_option"),
+        "reason": vote.get("reason"),
+    }
+    if vote.get("tie_break"):
+        stored["tie_break"] = True
+    return stored
 
 
 def _history_path(config: dict[str, Any]):

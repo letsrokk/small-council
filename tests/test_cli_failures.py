@@ -102,6 +102,115 @@ class CliFailureHandlingTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("retrying (1/2)", secretary.stream.getvalue())
         self.assertIn("Aurelia failed vote: temporary failure", secretary.stream.getvalue())
 
+    async def test_president_tie_break_returns_valid_canonical_vote(self) -> None:
+        president = _member("Bram")
+        round_result = cli.evaluate_vote_round(
+            [
+                {"proposer": "Aurelia", "recommendation": "Option A"},
+                {"proposer": "Bram", "recommendation": "Option B"},
+            ],
+            [
+                {"voter": "Aurelia", "selected_option": "Option A"},
+                {"voter": "Bram", "selected_option": "Option B"},
+            ],
+            1,
+        )
+        result = type(
+            "Result",
+            (),
+            {
+                "member": president,
+                "payload": {
+                    "voter": "Bram",
+                    "critique": "Close call.",
+                    "selected_option": "Bram original",
+                    "selected_proposer": "Bram",
+                    "reason": "Best remaining option.",
+                    "self_vote": True,
+                },
+            },
+        )()
+        groups = [
+            {
+                "canonical_option": "Option A",
+                "proposers": ["Aurelia"],
+                "member_recommendations": ["Option A"],
+            },
+            {
+                "canonical_option": "Option B",
+                "proposers": ["Bram"],
+                "member_recommendations": ["Bram original"],
+            },
+        ]
+        secretary = LocalSecretary(io.StringIO())
+        await secretary.start("Pick one")
+
+        with patch.object(cli, "_run_member_with_retries", new=AsyncMock(return_value=result)):
+            vote = await cli._president_tie_break(
+                {},
+                president,
+                "Pick one",
+                [{"proposer": "Bram", "recommendation": "Option B"}],
+                [round_result],
+                groups,
+                Path("schema.json"),
+                secretary,
+                4,
+            )
+
+        self.assertIsNotNone(vote)
+        assert vote is not None
+        self.assertEqual("Bram", vote["voter"])
+        self.assertEqual("Option B", vote["selected_option"])
+        self.assertEqual(4, vote["round"])
+        self.assertTrue(vote["tie_break"])
+
+    async def test_president_tie_break_invalid_choice_keeps_tie(self) -> None:
+        president = _member("Bram")
+        round_result = cli.evaluate_vote_round(
+            [
+                {"proposer": "Aurelia", "recommendation": "Option A"},
+                {"proposer": "Bram", "recommendation": "Option B"},
+            ],
+            [
+                {"voter": "Aurelia", "selected_option": "Option A"},
+                {"voter": "Bram", "selected_option": "Option B"},
+            ],
+            1,
+        )
+        result = type(
+            "Result",
+            (),
+            {
+                "member": president,
+                "payload": {
+                    "voter": "Bram",
+                    "critique": "Bad call.",
+                    "selected_option": "Option C",
+                    "selected_proposer": "Bram",
+                    "reason": "Invalid.",
+                    "self_vote": False,
+                },
+            },
+        )()
+        secretary = LocalSecretary(io.StringIO())
+        await secretary.start("Pick one")
+
+        with patch.object(cli, "_run_member_with_retries", new=AsyncMock(return_value=result)):
+            vote = await cli._president_tie_break(
+                {},
+                president,
+                "Pick one",
+                [{"proposer": "Bram", "recommendation": "Option B"}],
+                [round_result],
+                [],
+                Path("schema.json"),
+                secretary,
+                4,
+            )
+
+        self.assertIsNone(vote)
+
 
 class CliMainFailureMessageTests(unittest.TestCase):
     def test_usage_limit_main_message_is_concise_without_auth_hint(self) -> None:

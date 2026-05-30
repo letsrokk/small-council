@@ -31,6 +31,7 @@ class DecisionResult:
     winning_members: list[str]
     tied_options: list[str]
     tie_broken_by: str | None
+    tie_break_vote: dict[str, Any] | None
     vote_counts: dict[str, int]
     vote_rounds: list[VoteRound]
 
@@ -63,7 +64,12 @@ def evaluate_vote_round(
     )
 
 
-def decision_from_rounds(recommendations: list[dict], vote_rounds: list[VoteRound]) -> DecisionResult:
+def decision_from_rounds(
+    recommendations: list[dict],
+    vote_rounds: list[VoteRound],
+    tie_breaker_member: str | None = None,
+    tie_break_vote: dict[str, Any] | None = None,
+) -> DecisionResult:
     final_round = vote_rounds[-1]
     if final_round.resolved and final_round.winning_option:
         option = final_round.winning_option
@@ -74,9 +80,24 @@ def decision_from_rounds(recommendations: list[dict], vote_rounds: list[VoteRoun
             winning_members=_proposers_for_option(recommendations, option),
             tied_options=[],
             tie_broken_by=None,
+            tie_break_vote=None,
             vote_counts=final_round.vote_counts,
             vote_rounds=vote_rounds,
         )
+    if tie_breaker_member and tie_break_vote:
+        option = tie_break_vote.get("selected_option")
+        if option in final_round.tied_options:
+            return DecisionResult(
+                status="resolved",
+                winning_option=option,
+                winning_member=_proposer_for_option(recommendations, option),
+                winning_members=_proposers_for_option(recommendations, option),
+                tied_options=[],
+                tie_broken_by=tie_breaker_member,
+                tie_break_vote=tie_break_vote,
+                vote_counts=final_round.vote_counts,
+                vote_rounds=vote_rounds,
+            )
     return DecisionResult(
         status="unresolved_tie",
         winning_option=None,
@@ -84,6 +105,7 @@ def decision_from_rounds(recommendations: list[dict], vote_rounds: list[VoteRoun
         winning_members=[],
         tied_options=final_round.tied_options,
         tie_broken_by=None,
+        tie_break_vote=None,
         vote_counts=final_round.vote_counts,
         vote_rounds=vote_rounds,
     )

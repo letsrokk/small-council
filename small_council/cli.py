@@ -38,6 +38,7 @@ from .prompts import (
     discussion_prompt,
     discussion_round_prompt,
     equivalence_prompt,
+    president_tie_break_prompt,
     president_summary_prompt,
     research_prompt,
     runoff_prompt,
@@ -500,14 +501,42 @@ async def _run_decision(
             secretary.vote_round_done(_round_summary(vote_rounds[-1]))
             await secretary.report_milestone(f"runoff round {runoff_round} complete")
 
-        decision = decision_from_rounds(voting_recommendations, vote_rounds)
+        pres = president(members)
+        tie_break_vote = None
+        tie_breaker_member = None
+        if not vote_rounds[-1].resolved:
+            secretary.set_phase("president tie-break")
+            current_recommendations = filter_recommendations(
+                current_recommendations, vote_rounds[-1].tied_options
+            )
+            tie_break_vote = await _president_tie_break(
+                config,
+                pres,
+                question,
+                current_recommendations,
+                vote_rounds,
+                recommendation_groups,
+                vote_schema,
+                secretary,
+                max_runoff_rounds + 1,
+            )
+            if tie_break_vote:
+                all_votes.append(tie_break_vote)
+                tie_breaker_member = pres.name
+
+        decision = decision_from_rounds(
+            voting_recommendations,
+            vote_rounds,
+            tie_breaker_member=tie_breaker_member,
+            tie_break_vote=tie_break_vote,
+        )
         updated = update_after_decision(
             config=config,
             members=members,
             proposing_members={item["proposer"] for item in draft_recommendations},
             winning_member=decision.winning_member,
             voter_names={item["voter"] for item in all_votes},
-            tie_breaker_member=None,
+            tie_breaker_member=decision.tie_broken_by,
             winning_members=set(decision.winning_members),
         )
         leaderboard = read_json(resolve_project_path(config["storage"]["leaderboard_path"]), {})[
@@ -520,6 +549,8 @@ async def _run_decision(
             winning_member=decision.winning_member,
             votes=all_votes,
             final_tied_options=decision.tied_options,
+            tie_broken_by=decision.tie_broken_by,
+            tie_break_vote=decision.tie_break_vote,
         )
 
         winner_payload = _winner_payload(decision, max_runoff_rounds)
@@ -544,6 +575,8 @@ async def _run_decision(
             "winning_member": decision.winning_member,
             "winning_members": decision.winning_members,
             "final_tied_options": decision.tied_options,
+            "tie_broken_by": decision.tie_broken_by,
+            "tie_break_vote": decision.tie_break_vote,
             "draft_recommendations": draft_recommendations,
             "final_recommendations": current_recommendations,
             "discussion_rounds": discussion_round_payloads,
@@ -620,6 +653,44 @@ async def _group_recommendations(
     except Exception:
         groups = fallback_recommendation_groups(recommendations)
     return validate_recommendation_groups(groups, recommendations)
+
+
+async def _president_tie_break(
+    config: dict,
+    pres,
+    question: str,
+    tied_recommendations: list[dict],
+    vote_rounds: list,
+    groups: list[dict],
+    vote_schema,
+    secretary: BaseSecretary,
+    round_number: int,
+) -> dict | None:
+    tied_options = set(vote_rounds[-1].tied_options)
+    try:
+        result = await _run_member_with_retries(
+            config,
+            pres,
+            president_tie_break_prompt(
+                pres,
+                question,
+                tied_recommendations,
+                [round_result.to_dict() for round_result in vote_rounds],
+            ),
+            vote_schema,
+            "tie-break",
+            False,
+            secretary,
+        )
+        vote = canonicalize_vote(
+            _tag_vote(validate_vote(result.payload, result.member), round_number), groups
+        )
+        vote["tie_break"] = True
+    except Exception:
+        return None
+    if vote.get("selected_option") not in tied_options:
+        return None
+    return vote
 
 
 def _secretary_vote_done(
@@ -755,12 +826,15 @@ async def _final_output(
         why = "Won the council vote"
         if len(decision.vote_rounds) > 1:
             why += f" after {len(decision.vote_rounds) - 1} runoff round(s)"
+        if decision.tie_broken_by:
+            why += f"; tie broken by {decision.tie_broken_by}"
         return render_fallback(
             decision.winning_option,
             why + ".",
             all_votes,
             leaderboard,
             winning_members=decision.winning_members,
+            tie_broken_by=decision.tie_broken_by,
         )
 
 
@@ -775,7 +849,8 @@ def _winner_payload(decision, max_runoff_rounds: int) -> dict:
         "vote_rounds": [round_result.to_dict() for round_result in decision.vote_rounds],
         "runoff_rounds": max(0, len(decision.vote_rounds) - 1),
         "max_runoff_rounds": max_runoff_rounds,
-        "tie_broken_by": None,
+        "tie_broken_by": decision.tie_broken_by,
+        "tie_break_vote": decision.tie_break_vote,
     }
 
 

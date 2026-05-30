@@ -96,7 +96,7 @@ Increasing the council keeps existing members unchanged and creates new persiste
 
 ## Tie Runoffs
 
-If multiple options tie for the highest vote count, the council removes all lower-scoring options and votes again on only the tied options. The council gets 3 runoff rounds by default. If no single winner emerges, the final answer presents all remaining tied options instead of inventing a winner.
+If multiple options tie for the highest vote count, the council removes all lower-scoring options and votes again on only the tied options. The council gets 3 runoff rounds by default. If no single winner emerges after every runoff round, the President makes one final tie-break call. If that tie-break cannot be completed, the final answer presents all remaining tied options instead of inventing a winner.
 
 Override the runoff limit for a single decision:
 
