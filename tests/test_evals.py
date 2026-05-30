@@ -18,6 +18,8 @@ from evals.models import (
     ValidationResult,
     to_plain_data,
 )
+from evals.golden import golden_score, load_golden_datasets
+from evals.judges import JudgeResult, _judge_config, load_judge_config, parse_judge_payload
 from evals.report import render_markdown, write_json_report
 from evals.run_eval import (
     DEFAULT_COUNCIL_CMD,
@@ -155,6 +157,103 @@ class ScoringTests(unittest.TestCase):
             path = Path(tmp) / "report.json"
             write_json_report(report, path)
             self.assertEqual("SMOKE01", json.loads(path.read_text())["results"][0]["case"]["id"])
+
+    def test_golden_dataset_resolves_and_scores_payload(self) -> None:
+        case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
+        result = _case_result(case, score=80, passed=True, failures=[])
+        datasets = load_golden_datasets("evals/golden")
+
+        outcome = golden_score(case, result, datasets)
+
+        self.assertEqual(100, outcome.golden_score)
+        self.assertTrue(outcome.golden_pass)
+        self.assertEqual([], outcome.golden_failures)
+
+    def test_golden_dataset_flags_unacceptable_winner(self) -> None:
+        case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
+        payload = _valid_payload()
+        payload["winning_option"] = "Alien"
+        payload["final_output"] = "Choose Alien."
+        result = _case_result(case, score=80, passed=True, failures=[])
+        result.execution.json_payload = payload
+        datasets = load_golden_datasets("evals/golden")
+
+        outcome = golden_score(case, result, datasets)
+
+        self.assertFalse(outcome.golden_pass)
+        self.assertIn("winner_not_acceptable", outcome.golden_failures)
+
+    def test_judge_payload_parsing(self) -> None:
+        parsed = parse_judge_payload(
+            {
+                "score": 85,
+                "pass": True,
+                "reasoning": "Solid.",
+                "strengths": ["clear"],
+                "weaknesses": ["brief"],
+                "safety_concerns": [],
+                "regression_risk": "low",
+            }
+        )
+
+        self.assertEqual(85, parsed.score)
+        self.assertTrue(parsed.passed)
+        self.assertEqual(["clear"], parsed.strengths)
+        self.assertIsNone(parsed.error)
+
+    def test_load_judge_config_from_yaml(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "judge.yaml"
+            path.write_text(
+                "provider: ollama\n"
+                "model: qwen3:32b\n"
+                "options:\n"
+                "  temperature: 0.2\n"
+                "  seed: 123\n",
+                encoding="utf-8",
+            )
+
+            config = load_judge_config(path)
+
+        self.assertEqual("ollama", config.provider)
+        self.assertEqual("qwen3:32b", config.model)
+        self.assertEqual({"temperature": 0.2, "seed": 123}, config.options)
+
+    def test_load_judge_config_rejects_invalid_options(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "judge.yaml"
+            path.write_text(
+                "provider: ollama\n"
+                "model: qwen3:32b\n"
+                "options:\n"
+                "  temperature: warm\n"
+                "  seed: 42\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "temperature"):
+                load_judge_config(path)
+
+            path.write_text(
+                "provider: ollama\n"
+                "model: qwen3:32b\n"
+                "options:\n"
+                "  temperature: 0.3\n"
+                "  seed: fixed\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "seed"):
+                load_judge_config(path)
+
+    def test_judge_config_merges_model_and_options_into_provider_config(self) -> None:
+        config = _judge_config("ollama", "qwen3:32b", {"temperature": 0.1, "seed": 7})
+        provider = config["model_providers"]["ollama"]
+
+        self.assertTrue(provider["enabled"])
+        self.assertIn("qwen3:32b", provider["static_models"])
+        self.assertEqual(0.1, provider["options"]["temperature"])
+        self.assertEqual(7, provider["options"]["seed"])
 
 
 class RunnerTests(unittest.TestCase):
@@ -343,6 +442,223 @@ class RunnerTests(unittest.TestCase):
             self.assertIn("failures=invalid_json", rendered)
             self.assertIn("warning:", rendered)
             self.assertIn("stderr: model failed loudly", rendered)
+
+    def test_skip_runs_golden_against_existing_report(self) -> None:
+        case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "latest.json"
+            markdown = Path(tmp) / "latest.md"
+            output.write_text(json.dumps(_report_payload(_case_result(case, 80, True, []))), encoding="utf-8")
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "--skip",
+                        "--golden",
+                        "--input-report",
+                        str(output),
+                        "--output",
+                        str(output),
+                        "--markdown",
+                        str(markdown),
+                    ]
+                )
+
+            self.assertEqual(0, exit_code)
+            rendered = stdout.getvalue()
+            self.assertIn("Golden validation: 1 run(s), dir=evals/golden", rendered)
+            self.assertIn("[golden 1/1] SMOKE01 repeat 1 elapsed=", rendered)
+            self.assertIn("eta=", rendered)
+            self.assertIn("PASS score=100 elapsed=", rendered)
+            self.assertIn("Golden complete: average=100.0 pass_rate=100.0%", rendered)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(100, payload["results"][0]["golden_score"])
+            self.assertEqual(80, payload["results"][0]["deterministic_score"])
+
+    def test_skip_omits_unscored_golden_case_progress(self) -> None:
+        case = filter_cases(load_suite("evals/cases.yaml"), case_id="VOTING04")[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "latest.json"
+            markdown = Path(tmp) / "latest.md"
+            output.write_text(json.dumps(_report_payload(_case_result(case, 80, True, []))), encoding="utf-8")
+
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                exit_code = main(
+                    [
+                        "--skip",
+                        "--golden",
+                        "--input-report",
+                        str(output),
+                        "--output",
+                        str(output),
+                        "--markdown",
+                        str(markdown),
+                    ]
+                )
+
+            self.assertEqual(0, exit_code)
+            rendered = stdout.getvalue()
+            self.assertIn("Golden validation: 0 run(s), dir=evals/golden", rendered)
+            self.assertNotIn("[golden", rendered)
+            self.assertNotIn("SKIP score=-", rendered)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertIsNone(payload["results"][0]["golden_score"])
+            self.assertIsNone(payload["results"][0]["golden_pass"])
+
+    def test_skip_runs_mocked_judge_with_default_provider_and_model(self) -> None:
+        case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            input_report = Path(tmp) / "input.json"
+            output = Path(tmp) / "latest.json"
+            markdown = Path(tmp) / "latest.md"
+            input_report.write_text(json.dumps(_report_payload(_case_result(case, 80, True, []))), encoding="utf-8")
+            judged = JudgeResult(
+                score=90,
+                passed=True,
+                reasoning="Good semantic fit.",
+                strengths=["clear winner"],
+                weaknesses=[],
+                safety_concerns=[],
+                regression_risk="low",
+            )
+
+            with (
+                patch("evals.run_eval.judge_result", return_value=judged) as judge_mock,
+                redirect_stdout(stdout := io.StringIO()),
+            ):
+                exit_code = main(
+                    [
+                        "--skip",
+                        "--llm-judge",
+                        "--input-report",
+                        str(input_report),
+                        "--output",
+                        str(output),
+                        "--markdown",
+                        str(markdown),
+                    ]
+                )
+
+            self.assertEqual(0, exit_code)
+            rendered = stdout.getvalue()
+            self.assertIn("LLM judge: 1 run(s), provider=ollama model=qwen3:32b timeout=300s", rendered)
+            self.assertIn("[judge 1/1] SMOKE01 repeat 1 elapsed=", rendered)
+            self.assertIn("eta=", rendered)
+            self.assertIn("PASS score=90 risk=low elapsed=", rendered)
+            self.assertIn("Judge complete: average=90.0 pass_rate=100.0% errors=0", rendered)
+            judge_mock.assert_called_once()
+            self.assertEqual("ollama", judge_mock.call_args.kwargs["provider"])
+            self.assertEqual("qwen3:32b", judge_mock.call_args.kwargs["model"])
+            self.assertEqual(
+                {"temperature": 0.3, "seed": 42},
+                judge_mock.call_args.kwargs["options"],
+            )
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(90, payload["results"][0]["judge_score"])
+            self.assertEqual(82, payload["results"][0]["combined_score"])
+
+    def test_skip_judge_provider_and_model_cli_override_config(self) -> None:
+        case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            input_report = Path(tmp) / "input.json"
+            output = Path(tmp) / "latest.json"
+            markdown = Path(tmp) / "latest.md"
+            input_report.write_text(json.dumps(_report_payload(_case_result(case, 80, True, []))), encoding="utf-8")
+            judged = JudgeResult(score=90, passed=True, regression_risk="low")
+
+            with (
+                patch("evals.run_eval.judge_result", return_value=judged) as judge_mock,
+                redirect_stdout(stdout := io.StringIO()),
+            ):
+                exit_code = main(
+                    [
+                        "--skip",
+                        "--llm-judge",
+                        "--judge-provider",
+                        "codex",
+                        "--judge-model",
+                        "gpt-5.4-mini",
+                        "--input-report",
+                        str(input_report),
+                        "--output",
+                        str(output),
+                        "--markdown",
+                        str(markdown),
+                    ]
+                )
+
+        self.assertEqual(0, exit_code)
+        rendered = stdout.getvalue()
+        self.assertIn("LLM judge: 1 run(s), provider=codex model=gpt-5.4-mini timeout=300s", rendered)
+        self.assertEqual("codex", judge_mock.call_args.kwargs["provider"])
+        self.assertEqual("gpt-5.4-mini", judge_mock.call_args.kwargs["model"])
+        self.assertEqual({"temperature": 0.3, "seed": 42}, judge_mock.call_args.kwargs["options"])
+
+    def test_skip_judge_error_progress_and_verbose_reasoning(self) -> None:
+        case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            input_report = Path(tmp) / "input.json"
+            output = Path(tmp) / "latest.json"
+            markdown = Path(tmp) / "latest.md"
+            input_report.write_text(json.dumps(_report_payload(_case_result(case, 80, True, []))), encoding="utf-8")
+            judged = JudgeResult(error="judge provider unavailable because the model is missing")
+
+            with (
+                patch("evals.run_eval.judge_result", return_value=judged),
+                redirect_stdout(stdout := io.StringIO()),
+            ):
+                exit_code = main(
+                    [
+                        "--skip",
+                        "--llm-judge",
+                        "--verbose",
+                        "--input-report",
+                        str(input_report),
+                        "--output",
+                        str(output),
+                        "--markdown",
+                        str(markdown),
+                    ]
+                )
+
+            rendered = stdout.getvalue()
+            self.assertEqual(0, exit_code)
+            self.assertIn("ERROR score=- elapsed=", rendered)
+            self.assertIn("eta=", rendered)
+            self.assertIn("error=judge provider unavailable", rendered)
+            self.assertIn("judge error: judge provider unavailable", rendered)
+
+    def test_skip_quiet_suppresses_golden_and_judge_progress(self) -> None:
+        case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            input_report = Path(tmp) / "input.json"
+            output = Path(tmp) / "latest.json"
+            markdown = Path(tmp) / "latest.md"
+            input_report.write_text(json.dumps(_report_payload(_case_result(case, 80, True, []))), encoding="utf-8")
+
+            with (
+                patch("evals.run_eval.judge_result", return_value=JudgeResult(score=90, passed=True, regression_risk="low")),
+                redirect_stdout(stdout := io.StringIO()),
+            ):
+                exit_code = main(
+                    [
+                        "--skip",
+                        "--golden",
+                        "--llm-judge",
+                        "--quiet",
+                        "--input-report",
+                        str(input_report),
+                        "--output",
+                        str(output),
+                        "--markdown",
+                        str(markdown),
+                    ]
+                )
+
+            self.assertEqual(0, exit_code)
+            self.assertEqual("", stdout.getvalue())
 
     def test_execute_case_with_mock_command(self) -> None:
         case = load_suite("evals/cases.yaml")[0]

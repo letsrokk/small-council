@@ -1,0 +1,45 @@
+SMOKE01:
+  acceptable_winners:
+    - Arrival
+  unacceptable_winners:
+    - Alien
+  required_final_output_terms:
+    - Arrival
+  required_behaviors:
+    - tradeoff
+  expected_status:
+    - resolved
+  allow_unresolved_tie: false
+
+SMOKE05:
+  acceptable_winners:
+    - Pizza
+    - Sushi
+    - Burger
+  required_behaviors:
+    - choose one
+  expected_status:
+    - resolved
+  allow_unresolved_tie: false
+
+SMOKE06:
+  acceptable_winners:
+    - A
+    - B
+  forbidden_behaviors:
+    - clearly better
+    - objectively superior
+  expected_status:
+    - resolved
+    - unresolved
+  allow_unresolved_tie: true
+
+SMOKE07:
+  acceptable_winners:
+    - Pizza
+    - Italian flatbread with cheese and tomato sauce
+  required_behaviors:
+    - equivalent
+  expected_status:
+    - resolved
+  allow_unresolved_tie: false

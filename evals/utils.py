@@ -63,6 +63,8 @@ def _case_from_mapping(item: Any, suite_path: Path) -> EvalCase:
         expected_behavior=[str(value) for value in item["expected_behavior"]],
         scoring_focus=[str(value) for value in item["scoring_focus"]],
         hard_failure_rules=[str(value) for value in item["hard_failure_rules"]],
+        golden_ref=str(item["golden_ref"]) if item.get("golden_ref") is not None else None,
+        golden=dict(item["golden"]) if isinstance(item.get("golden"), dict) else None,
     )
 
 

@@ -63,9 +63,11 @@ By default, `./eval` prints progress to stdout:
 - suite path, selected case count, repeat count, total runs, and report paths at startup
 - one line before each case run with elapsed time and ETA
 - one PASS/FAIL result line with score, duration, JSON status, elapsed time, ETA, and hard failures when present
+- when `--golden` is enabled, a golden phase header, one `[golden i/N]` line per run with elapsed time and ETA, one result line, and a completion summary
+- when `--llm-judge` is enabled, a judge phase header with provider/model, one `[judge i/N]` line before each judge call with elapsed time and ETA, one result line, and a completion summary
 - a final summary with average score, pass rate, JSON validity, total elapsed time, written report paths, and comparison to the previous report when available
 
-Use `--quiet` for report-only execution with no progress output:
+Use `--quiet` for report-only execution with no progress output, including golden and judge post-processing:
 
 ```bash
 ./eval --quiet
@@ -81,7 +83,68 @@ Verbosity levels:
 
 - default: concise progress and per-case PASS/FAIL lines
 - `--quiet`: no progress output; JSON and Markdown reports are still written
-- `--verbose`: default output plus failure diagnostics
+- `--verbose`: default output plus failure diagnostics, golden failure details, and judge reasoning/error excerpts
+
+## Golden Validation and LLM Judge
+
+Golden validation and LLM judging are post-processing phases. The deterministic
+eval report is produced first; golden validation runs next when enabled; the
+LLM judge runs last when enabled. Deterministic hard failures remain the
+authoritative release gate.
+
+Run deterministic eval plus golden validation:
+
+```bash
+./eval --case SMOKE01 --golden
+```
+
+Run deterministic eval plus golden validation and an LLM judge:
+
+```bash
+./eval --case SMOKE01 --golden --llm-judge
+```
+
+The judge uses the existing council model provider stack and reads its default
+provider/model/options from `config/judge.yaml`:
+
+```yaml
+provider: ollama
+model: qwen3:32b
+options:
+  temperature: 0.3
+  seed: 42
+```
+
+Override provider and model from the CLI when needed:
+
+```bash
+./eval --llm-judge --judge-provider codex --judge-model gpt-5.4-mini
+```
+
+Re-run post-processing against an existing deterministic report without
+executing `./council`:
+
+```bash
+./eval --skip --golden --input-report evals/reports/latest.json
+./eval --skip --golden --llm-judge --input-report evals/reports/latest.json
+```
+
+Useful post-processing options:
+
+```bash
+./eval \
+  --golden \
+  --golden-dir evals/golden \
+  --golden-weight 0.30 \
+  --llm-judge \
+  --judge-timeout-seconds 300 \
+  --judge-weight 0.20
+```
+
+Fresh deterministic runs snapshot modified `runtime/logs`, `runtime/temp`, and
+`storage` files into `evals/reports/artifacts/` for later judge context. When
+`--skip` is used with an older report that has no artifact paths, judging still
+uses the deterministic report data.
 
 ## Previous Report Comparison
 
@@ -101,8 +164,10 @@ backs up to `tmp/previous.json` and `tmp/previous.md` if those latest files
 already exist.
 
 After the new reports are written, the final summary compares the new JSON
-report against `previous.json`. It prints aggregate deltas for run count,
-average score, pass rate, and JSON validity, plus only changed per-case runs.
+report against `previous.json`. Pass `--compare path/to/previous.json` to choose
+an explicit baseline. It prints aggregate deltas for run count, average score,
+pass rate, JSON validity, category deltas, regressions, improvements, and
+changed per-case runs.
 If no previous JSON report exists, the summary says `previous report: none`.
 
 ## Scoring
@@ -120,4 +185,15 @@ Scores are deterministic and total 100:
 
 Hard caps are applied for invalid JSON, crashes, missing winners, final-answer contradiction, unsafe instruction following, and hallucination traps.
 
-The result model already includes `golden_score`, `judge_score`, and `combined_score` for future extensions. They are currently `null`.
+Optional post-processing populates `golden_score`, `judge_score`, and
+`combined_score`.
+
+Blending defaults:
+
+- deterministic only: 100% deterministic
+- golden only: 70% deterministic, 30% golden
+- judge only: 75% deterministic, 25% judge
+- golden and judge: 55% deterministic, 25% golden, 20% judge
+
+Custom golden and judge weights are normalized against the deterministic
+component. Deterministic hard caps are applied after blending.

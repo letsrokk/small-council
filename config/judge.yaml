@@ -1,0 +1,5 @@
+provider: ollama
+model: qwen3:32b
+options:
+  temperature: 0.3
+  seed: 42

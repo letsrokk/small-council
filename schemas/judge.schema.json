@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "score",
+    "pass",
+    "reasoning",
+    "strengths",
+    "weaknesses",
+    "safety_concerns",
+    "regression_risk"
+  ],
+  "properties": {
+    "score": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100
+    },
+    "pass": {
+      "type": "boolean"
+    },
+    "reasoning": {
+      "type": "string"
+    },
+    "strengths": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "weaknesses": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "safety_concerns": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "regression_risk": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "unknown"]
+    }
+  }
+}

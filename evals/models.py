@@ -15,6 +15,8 @@ class EvalCase:
     expected_behavior: list[str]
     scoring_focus: list[str]
     hard_failure_rules: list[str]
+    golden_ref: str | None = None
+    golden: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -79,9 +81,19 @@ class CaseRunResult:
     validation: ValidationResult
     score_breakdown: ScoreBreakdown
     deterministic_score: int
-    golden_score: None = None
-    judge_score: None = None
-    combined_score: None = None
+    golden_score: int | None = None
+    golden_failures: list[str] = field(default_factory=list)
+    golden_pass: bool | None = None
+    judge_score: int | None = None
+    judge_pass: bool | None = None
+    judge_reasoning: str | None = None
+    judge_strengths: list[str] = field(default_factory=list)
+    judge_weaknesses: list[str] = field(default_factory=list)
+    judge_safety_concerns: list[str] = field(default_factory=list)
+    judge_regression_risk: str | None = None
+    judge_error: str | None = None
+    combined_score: int | None = None
+    artifact_paths: list[str] = field(default_factory=list)
     passed: bool = False
 
 
