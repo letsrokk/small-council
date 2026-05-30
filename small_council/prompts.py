@@ -164,6 +164,9 @@ Independent recommendations:
 Group recommendations that are effectively the same final decision option.
 Be conservative: merge clearly identical final actions, such as the same movie, restaurant, recipe, game, or product.
 Do not merge merely similar alternatives.
+Each proposer must appear in exactly one group.
+Do not change a member's recommendation to a different option when grouping.
+For example, "Pizza" and "Italian flatbread with cheese and tomato sauce" can be the same final option, but "Pizza" and "Sushi" must stay separate.
 
 For each group, provide:
 - canonical_option: the best concise option text voters should use

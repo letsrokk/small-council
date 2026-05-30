@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import unittest
 
-from small_council.decision import decision_from_rounds, evaluate_vote_round
+from small_council.decision import (
+    canonical_recommendations,
+    decision_from_rounds,
+    evaluate_vote_round,
+    validate_recommendation_groups,
+)
 
 
 class DecisionTieBreakTests(unittest.TestCase):
@@ -67,6 +72,100 @@ class DecisionTieBreakTests(unittest.TestCase):
         self.assertIsNone(decision.tie_broken_by)
         self.assertIsNone(decision.tie_break_vote)
         self.assertEqual(["Option A", "Option B"], decision.tied_options)
+
+
+class RecommendationGroupingTests(unittest.TestCase):
+    def test_groups_pizza_and_italian_flatbread_aliases(self) -> None:
+        recommendations = [
+            {"proposer": "Aurelia", "recommendation": "Pizza"},
+            {"proposer": "Echo", "recommendation": "Italian flatbread with cheese and tomato sauce"},
+            {"proposer": "Bram", "recommendation": "Sushi"},
+        ]
+        groups = validate_recommendation_groups(
+            [
+                {
+                    "canonical_option": "Pizza",
+                    "proposers": ["Aurelia", "Echo"],
+                    "member_recommendations": [
+                        "Pizza",
+                        "Italian flatbread with cheese and tomato sauce",
+                    ],
+                    "reason": "Same final food option.",
+                },
+                {
+                    "canonical_option": "Sushi",
+                    "proposers": ["Bram"],
+                    "member_recommendations": ["Sushi"],
+                    "reason": "Distinct option.",
+                },
+            ],
+            recommendations,
+        )
+
+        self.assertEqual(
+            [
+                {
+                    "canonical_option": "Pizza",
+                    "proposers": ["Aurelia", "Echo"],
+                    "member_recommendations": [
+                        "Pizza",
+                        "Italian flatbread with cheese and tomato sauce",
+                    ],
+                    "reason": "Same final food option.",
+                },
+                {
+                    "canonical_option": "Sushi",
+                    "proposers": ["Bram"],
+                    "member_recommendations": ["Sushi"],
+                    "reason": "Distinct option.",
+                },
+            ],
+            groups,
+        )
+
+    def test_splits_incoherent_group_with_pizza_and_sushi(self) -> None:
+        recommendations = [
+            {"proposer": "Aurelia", "recommendation": "Pizza"},
+            {"proposer": "Bram", "recommendation": "Sushi"},
+            {"proposer": "Cato", "recommendation": "Sushi"},
+            {"proposer": "Echo", "recommendation": "Pizza"},
+        ]
+        groups = validate_recommendation_groups(
+            [
+                {
+                    "canonical_option": "Sushi",
+                    "proposers": ["Aurelia", "Bram", "Cato", "Echo"],
+                    "member_recommendations": ["Pizza", "Sushi", "Sushi", "Pizza"],
+                    "reason": "All recommendations converge on Sushi.",
+                }
+            ],
+            recommendations,
+        )
+
+        self.assertEqual(["Pizza", "Sushi"], [group["canonical_option"] for group in groups])
+        self.assertEqual(["Aurelia", "Echo"], groups[0]["proposers"])
+        self.assertEqual(["Bram", "Cato"], groups[1]["proposers"])
+
+    def test_canonical_recommendations_keep_split_groups_distinct(self) -> None:
+        recommendations = [
+            {"proposer": "Aurelia", "recommendation": "Pizza"},
+            {"proposer": "Bram", "recommendation": "Sushi"},
+        ]
+        groups = validate_recommendation_groups(
+            [
+                {
+                    "canonical_option": "Sushi",
+                    "proposers": ["Aurelia", "Bram"],
+                    "member_recommendations": ["Pizza", "Sushi"],
+                    "reason": "Bad merge.",
+                }
+            ],
+            recommendations,
+        )
+
+        voting_options = [item["recommendation"] for item in canonical_recommendations(groups)]
+
+        self.assertEqual(["Pizza", "Sushi"], voting_options)
 
 
 if __name__ == "__main__":

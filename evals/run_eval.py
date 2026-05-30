@@ -503,6 +503,9 @@ def _metadata_from_plain(data: dict[str, Any]) -> EvalRunMetadata:
 
 
 def _result_from_plain(data: dict[str, Any]) -> CaseRunResult:
+    judge_score, judge_weaknesses = _judge_score_from_plain(
+        data.get("judge_score"), data.get("judge_weaknesses")
+    )
     return CaseRunResult(
         case=_case_from_plain(data.get("case") or {}),
         repeat_index=int(data.get("repeat_index") or 1),
@@ -513,11 +516,11 @@ def _result_from_plain(data: dict[str, Any]) -> CaseRunResult:
         golden_score=_optional_int(data.get("golden_score")),
         golden_failures=_string_list(data.get("golden_failures")),
         golden_pass=_optional_bool(data.get("golden_pass")),
-        judge_score=_optional_int(data.get("judge_score")),
+        judge_score=judge_score,
         judge_pass=_optional_bool(data.get("judge_pass")),
         judge_reasoning=_optional_str(data.get("judge_reasoning")),
         judge_strengths=_string_list(data.get("judge_strengths")),
-        judge_weaknesses=_string_list(data.get("judge_weaknesses")),
+        judge_weaknesses=judge_weaknesses,
         judge_safety_concerns=_string_list(data.get("judge_safety_concerns")),
         judge_regression_risk=_optional_str(data.get("judge_regression_risk")),
         judge_error=_optional_str(data.get("judge_error")),
@@ -525,6 +528,17 @@ def _result_from_plain(data: dict[str, Any]) -> CaseRunResult:
         artifact_paths=_string_list(data.get("artifact_paths")),
         passed=bool(data.get("passed", False)),
     )
+
+
+def _judge_score_from_plain(value: Any, weaknesses_value: Any) -> tuple[int | None, list[str]]:
+    score = _optional_int(value)
+    weaknesses = _string_list(weaknesses_value)
+    if score is not None and 1 <= score <= 10:
+        score *= 10
+        note = "Judge score was normalized from a 1-10 scale to 0-100."
+        if note not in weaknesses:
+            weaknesses.append(note)
+    return score, weaknesses
 
 
 def _case_from_plain(data: dict[str, Any]) -> EvalCase:

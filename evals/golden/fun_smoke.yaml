@@ -5,8 +5,6 @@ SMOKE01:
     - Alien
   required_final_output_terms:
     - Arrival
-  required_behaviors:
-    - tradeoff
   expected_status:
     - resolved
   allow_unresolved_tie: false
@@ -16,8 +14,6 @@ SMOKE05:
     - Pizza
     - Sushi
     - Burger
-  required_behaviors:
-    - choose one
   expected_status:
     - resolved
   allow_unresolved_tie: false

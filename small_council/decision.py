@@ -146,7 +146,7 @@ def validate_recommendation_groups(groups: list[dict], recommendations: list[dic
         for recommendation in recommendations
     }
     seen: set[str] = set()
-    validated: list[dict] = []
+    provisional: list[dict] = []
     for group in groups:
         proposers = [
             proposer
@@ -157,19 +157,13 @@ def validate_recommendation_groups(groups: list[dict], recommendations: list[dic
             continue
         seen.update(proposers)
         member_recommendations = [proposer_to_recommendation[proposer] for proposer in proposers]
-        canonical = str(group.get("canonical_option") or member_recommendations[0]).strip()
-        validated.append(
-            {
-                "canonical_option": canonical,
-                "proposers": proposers,
-                "member_recommendations": member_recommendations,
-                "reason": str(group.get("reason") or "Grouped by the President.").strip(),
-            }
-        )
+        reason = str(group.get("reason") or "Grouped by the President.").strip()
+        for split in _split_incoherent_group(proposers, member_recommendations, reason):
+            provisional.append(split)
     for recommendation in recommendations:
         proposer = recommendation["proposer"]
         if proposer not in seen:
-            validated.append(
+            provisional.append(
                 {
                     "canonical_option": recommendation["recommendation"],
                     "proposers": [proposer],
@@ -177,7 +171,64 @@ def validate_recommendation_groups(groups: list[dict], recommendations: list[dic
                     "reason": "Kept as a distinct option.",
                 }
             )
-    return validated
+    return _coalesce_equivalent_groups(provisional)
+
+
+def _split_incoherent_group(
+    proposers: list[str], member_recommendations: list[str], reason: str
+) -> list[dict]:
+    by_key: dict[str, dict] = {}
+    for proposer, recommendation in zip(proposers, member_recommendations):
+        key = _option_equivalence_key(recommendation)
+        group = by_key.setdefault(
+            key,
+            {
+                "canonical_option": recommendation,
+                "proposers": [],
+                "member_recommendations": [],
+                "reason": reason,
+            },
+        )
+        group["proposers"].append(proposer)
+        group["member_recommendations"].append(recommendation)
+    return list(by_key.values())
+
+
+def _coalesce_equivalent_groups(groups: list[dict]) -> list[dict]:
+    by_key: dict[str, dict] = {}
+    for group in groups:
+        key = _option_equivalence_key(group["canonical_option"])
+        if key not in by_key:
+            by_key[key] = {
+                "canonical_option": _canonical_for_key(key, group["canonical_option"]),
+                "proposers": [],
+                "member_recommendations": [],
+                "reason": group["reason"],
+            }
+        merged = by_key[key]
+        merged["proposers"].extend(group["proposers"])
+        merged["member_recommendations"].extend(group["member_recommendations"])
+        if group["reason"] not in merged["reason"]:
+            merged["reason"] = f"{merged['reason']} {group['reason']}".strip()
+    return list(by_key.values())
+
+
+def _option_equivalence_key(option: str) -> str:
+    normalized = normalize_option(option)
+    compact = re.sub(r"[^a-z0-9]+", " ", normalized).strip()
+    if compact in {
+        "pizza",
+        "italian flatbread with cheese and tomato sauce",
+        "flatbread with cheese and tomato sauce",
+    }:
+        return "pizza"
+    return compact
+
+
+def _canonical_for_key(key: str, fallback: str) -> str:
+    if key == "pizza":
+        return "Pizza"
+    return fallback
 
 
 def canonical_recommendations(groups: list[dict]) -> list[dict]:

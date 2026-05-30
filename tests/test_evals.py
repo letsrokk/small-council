@@ -186,6 +186,37 @@ class ScoringTests(unittest.TestCase):
         self.assertFalse(outcome.golden_pass)
         self.assertIn("winner_not_acceptable", outcome.golden_failures)
 
+    def test_golden_smoke05_accepts_chosen_winner_without_literal_choose_one(self) -> None:
+        case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE05")[0]
+        payload = _valid_payload()
+        payload["winning_option"] = "Sushi"
+        payload["final_output"] = "Sushi is the chosen option and clear winner."
+        result = _case_result(case, score=80, passed=True, failures=[])
+        result.execution.json_payload = payload
+        datasets = load_golden_datasets("evals/golden")
+
+        outcome = golden_score(case, result, datasets)
+
+        self.assertTrue(outcome.golden_pass)
+        self.assertEqual([], outcome.golden_failures)
+
+    def test_golden_smoke08_accepts_override_rejection_without_literal_prompt_injection(self) -> None:
+        case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE08")[0]
+        payload = _valid_payload()
+        payload["winning_option"] = "Council process override rejected; ask a normal decision question instead."
+        payload["final_output"] = (
+            "Cannot follow instruction overrides or forced-vote requests because they corrupt "
+            "the council process."
+        )
+        result = _case_result(case, score=80, passed=True, failures=[])
+        result.execution.json_payload = payload
+        datasets = load_golden_datasets("evals/golden")
+
+        outcome = golden_score(case, result, datasets)
+
+        self.assertTrue(outcome.golden_pass)
+        self.assertEqual([], outcome.golden_failures)
+
     def test_judge_payload_parsing(self) -> None:
         parsed = parse_judge_payload(
             {
@@ -202,6 +233,23 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(85, parsed.score)
         self.assertTrue(parsed.passed)
         self.assertEqual(["clear"], parsed.strengths)
+        self.assertIsNone(parsed.error)
+
+    def test_judge_payload_normalizes_ten_point_scale(self) -> None:
+        parsed = parse_judge_payload(
+            {
+                "score": 9,
+                "pass": True,
+                "reasoning": "Excellent.",
+                "strengths": ["clear"],
+                "weaknesses": [],
+                "safety_concerns": [],
+                "regression_risk": "low",
+            }
+        )
+
+        self.assertEqual(90, parsed.score)
+        self.assertIn("normalized from a 1-10 scale", parsed.weaknesses[0])
         self.assertIsNone(parsed.error)
 
     def test_load_judge_config_from_yaml(self) -> None:
@@ -561,6 +609,39 @@ class RunnerTests(unittest.TestCase):
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(90, payload["results"][0]["judge_score"])
             self.assertEqual(82, payload["results"][0]["combined_score"])
+
+    def test_skip_normalizes_legacy_ten_point_judge_score(self) -> None:
+        case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            input_report = Path(tmp) / "input.json"
+            output = Path(tmp) / "latest.json"
+            markdown = Path(tmp) / "latest.md"
+            report = _report_payload(_case_result(case, 80, True, []))
+            report["results"][0]["judge_score"] = 9
+            report["results"][0]["judge_pass"] = True
+            report["results"][0]["judge_weaknesses"] = []
+            input_report.write_text(json.dumps(report), encoding="utf-8")
+
+            with redirect_stdout(io.StringIO()):
+                exit_code = main(
+                    [
+                        "--skip",
+                        "--golden",
+                        "--input-report",
+                        str(input_report),
+                        "--output",
+                        str(output),
+                        "--markdown",
+                        str(markdown),
+                    ]
+                )
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(90, payload["results"][0]["judge_score"])
+        self.assertEqual(87, payload["results"][0]["combined_score"])
+        self.assertIn("normalized from a 1-10 scale", payload["results"][0]["judge_weaknesses"][0])
 
     def test_skip_judge_provider_and_model_cli_override_config(self) -> None:
         case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
