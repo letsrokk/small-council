@@ -198,6 +198,8 @@ def main(argv: list[str] | None = None) -> int:
             renderer.error(f"Council failed: {exc}")
         else:
             print(f"Council failed: {exc}", file=sys.stderr)
+        if args.json_output:
+            print(render_json_decision(_failure_payload(question, config, args, str(exc))))
         if renderer:
             renderer.close()
         return 1
@@ -213,6 +215,8 @@ def main(argv: list[str] | None = None) -> int:
                 "CODEX_HOME=$PWD/.codex codex login",
                 file=sys.stderr,
             )
+        if args.json_output:
+            print(render_json_decision(_failure_payload(question, config, args, str(exc))))
         if renderer:
             renderer.close()
         return 1
@@ -236,6 +240,33 @@ def _positive_int(value: str) -> int:
     if parsed <= 0:
         raise argparse.ArgumentTypeError("must be a positive integer")
     return parsed
+
+
+def _failure_payload(question: str, config: dict, args: argparse.Namespace, error: str) -> dict:
+    return {
+        "final_output": f"Council failed before producing a decision: {error}",
+        "status": "failed",
+        "winning_option": None,
+        "winning_member": None,
+        "winning_members": [],
+        "final_tied_options": [],
+        "tie_broken_by": None,
+        "tie_break_vote": None,
+        "draft_recommendations": [],
+        "final_recommendations": [],
+        "discussion_rounds": [],
+        "discussion_transcript": [],
+        "recommendation_groups": [],
+        "votes": [],
+        "vote_rounds": [],
+        "leaderboard": [],
+        "runoff_rounds": 0,
+        "max_runoff_rounds": _runoff_rounds(config, args),
+        "diversity_mode": _diversity_mode(config, args),
+        "diversity_lanes": {},
+        "error": error,
+        "question": question,
+    }
 
 
 def _maybe_resize_members(config: dict, members, args: argparse.Namespace, parser: argparse.ArgumentParser):

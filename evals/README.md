@@ -27,6 +27,14 @@ Run a subset:
 ./eval --tag safety
 ```
 
+Re-run only cases that failed in the latest report:
+
+```bash
+./eval --failed-only
+./eval --failed-only --failed-report evals/reports/previous.json
+./eval --failed-only --golden --llm-judge
+```
+
 Useful options:
 
 ```bash

@@ -121,6 +121,26 @@ class ProviderConfigTests(unittest.TestCase):
 
         self.assertEqual({"temperature": 1.0, "seed": 99}, options)
 
+    def test_ollama_options_accept_num_ctx(self) -> None:
+        config = _config()
+        config["model_providers"]["ollama"]["options"] = {
+            "temperature": 0.9,
+            "seed": 7,
+            "num_ctx": 16384,
+        }
+
+        with patch.dict("os.environ", {}, clear=True):
+            options = provider_options(config, "ollama")
+
+        self.assertEqual({"temperature": 0.9, "seed": 7, "num_ctx": 16384}, options)
+
+    def test_ollama_options_reject_invalid_num_ctx(self) -> None:
+        config = _config()
+        config["model_providers"]["ollama"]["options"] = {"num_ctx": "large"}
+
+        with self.assertRaisesRegex(ValueError, "num_ctx"):
+            provider_options(config, "ollama")
+
     def test_effective_models_apply_size_enabled_and_disabled_filters(self) -> None:
         config = _config()
         config["model_providers"]["ollama"]["enabled_models"] = ["qwen3:8b", "qwen3:14b"]

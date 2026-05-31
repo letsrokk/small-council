@@ -62,6 +62,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--compare")
     parser.add_argument("--skip", action="store_true", help="Skip deterministic execution and post-process an existing report.")
     parser.add_argument("--input-report")
+    parser.add_argument(
+        "--failed-only",
+        action="store_true",
+        help="Rerun only cases that failed in the latest report.",
+    )
+    parser.add_argument(
+        "--failed-report",
+        default="evals/reports/latest.json",
+        help="Report to read failed cases from when --failed-only is used.",
+    )
     parser.add_argument("--artifact-dir", default="evals/reports/artifacts")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress output.")
     parser.add_argument(
@@ -83,6 +93,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--judge-weight must be non-negative")
     if args.skip and not (args.golden or args.llm_judge):
         parser.error("--skip requires --golden and/or --llm-judge")
+    if args.skip and args.failed_only:
+        parser.error("--failed-only cannot be used with --skip")
 
     suite_path = Path(args.suite)
     suite_start = time.monotonic()
@@ -106,12 +118,16 @@ def main(argv: list[str] | None = None) -> int:
             _backup_previous_report(args.markdown)
         _print_skip_start(args, input_report, len(cases))
     else:
-        cases = filter_cases(
-            load_suite(suite_path),
-            case_id=args.case_id,
-            category=args.category,
-            tag=args.tag,
-        )
+        suite_cases = load_suite(suite_path)
+        if args.failed_only:
+            cases = _failed_cases_from_report(args, suite_cases, suite_path, parser)
+        else:
+            cases = filter_cases(
+                suite_cases,
+                case_id=args.case_id,
+                category=args.category,
+                tag=args.tag,
+            )
         if not cases:
             parser.error("No cases matched the selected filters.")
         previous_json_path = Path(args.compare) if args.compare else _backup_previous_report(args.output)
@@ -489,6 +505,32 @@ def _filter_results(
     return selected
 
 
+def _failed_cases_from_report(
+    args: argparse.Namespace,
+    suite_cases: list[EvalCase],
+    suite_path: Path,
+    parser: argparse.ArgumentParser,
+) -> list[EvalCase]:
+    failed_report = Path(args.failed_report)
+    report = load_json_report(failed_report)
+    _enrich_report_cases(report, suite_path)
+    failed_results = [result for result in report.results if not result.passed]
+    failed_results = _filter_results(
+        failed_results,
+        case_id=args.case_id,
+        category=args.category,
+        tag=args.tag,
+    )
+    if not failed_results:
+        parser.error("No failed cases matched the selected filters.")
+
+    suite_by_id = {case.id: case for case in suite_cases}
+    cases = [suite_by_id[result.case.id] for result in failed_results if result.case.id in suite_by_id]
+    if not cases:
+        parser.error("No failed report cases exist in the current suite.")
+    return cases
+
+
 def _metadata_from_plain(data: dict[str, Any]) -> EvalRunMetadata:
     return EvalRunMetadata(
         timestamp=str(data.get("timestamp") or datetime.now(timezone.utc).isoformat()),
@@ -503,8 +545,8 @@ def _metadata_from_plain(data: dict[str, Any]) -> EvalRunMetadata:
 
 
 def _result_from_plain(data: dict[str, Any]) -> CaseRunResult:
-    judge_score, judge_weaknesses = _judge_score_from_plain(
-        data.get("judge_score"), data.get("judge_weaknesses")
+    judge_score, judge_weaknesses, judge_error = _judge_score_from_plain(
+        data.get("judge_score"), data.get("judge_weaknesses"), data.get("judge_error")
     )
     return CaseRunResult(
         case=_case_from_plain(data.get("case") or {}),
@@ -523,22 +565,26 @@ def _result_from_plain(data: dict[str, Any]) -> CaseRunResult:
         judge_weaknesses=judge_weaknesses,
         judge_safety_concerns=_string_list(data.get("judge_safety_concerns")),
         judge_regression_risk=_optional_str(data.get("judge_regression_risk")),
-        judge_error=_optional_str(data.get("judge_error")),
+        judge_error=judge_error,
         combined_score=_optional_int(data.get("combined_score")),
         artifact_paths=_string_list(data.get("artifact_paths")),
         passed=bool(data.get("passed", False)),
     )
 
 
-def _judge_score_from_plain(value: Any, weaknesses_value: Any) -> tuple[int | None, list[str]]:
+def _judge_score_from_plain(
+    value: Any, weaknesses_value: Any, error_value: Any
+) -> tuple[int | None, list[str], str | None]:
     score = _optional_int(value)
     weaknesses = _string_list(weaknesses_value)
+    error = _optional_str(error_value)
     if score is not None and 1 <= score <= 10:
-        score *= 10
-        note = "Judge score was normalized from a 1-10 scale to 0-100."
+        score = None
+        note = "Judge score rejected because it appears to use a 1-10 scale."
         if note not in weaknesses:
             weaknesses.append(note)
-    return score, weaknesses
+        error = error or note
+    return score, weaknesses, error
 
 
 def _case_from_plain(data: dict[str, Any]) -> EvalCase:

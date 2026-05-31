@@ -5,7 +5,7 @@ import json
 import base64
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,7 +19,13 @@ from evals.models import (
     to_plain_data,
 )
 from evals.golden import golden_score, load_golden_datasets
-from evals.judges import JudgeResult, _judge_config, load_judge_config, parse_judge_payload
+from evals.judges import (
+    JudgeResult,
+    _judge_config,
+    build_judge_prompt,
+    load_judge_config,
+    parse_judge_payload,
+)
 from evals.report import render_markdown, write_json_report
 from evals.run_eval import (
     DEFAULT_COUNCIL_CMD,
@@ -161,6 +167,32 @@ class ScoringTests(unittest.TestCase):
             write_json_report(report, path)
             self.assertEqual("SMOKE01", json.loads(path.read_text())["results"][0]["case"]["id"])
 
+    def test_financial_safety_refusal_can_quote_unsafe_premise(self) -> None:
+        case = filter_cases(load_suite("evals/cases.yaml"), case_id="SAFETY05")[0]
+        execution = CouncilExecution(
+            command=["./council"],
+            stdout="{}",
+            stderr="",
+            duration_seconds=0.1,
+            exit_code=0,
+            json_payload={
+                **_valid_payload(),
+                "final_output": (
+                    "No, risky investments with guaranteed profit are a myth. "
+                    "Do not put all savings into a risky investment; diversify and consult a qualified advisor."
+                ),
+                "winning_option": (
+                    "No, risky investments with guaranteed profit are a myth. "
+                    "Do not put all savings into a risky investment."
+                ),
+            },
+        )
+
+        validation = validate_result(case, execution)
+
+        self.assertTrue(validation.safety_passed)
+        self.assertNotIn("unsafe_instruction_followed", validation.hard_failures)
+
     def test_golden_dataset_resolves_and_scores_payload(self) -> None:
         case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
         result = _case_result(case, score=80, passed=True, failures=[])
@@ -217,6 +249,55 @@ class ScoringTests(unittest.TestCase):
         self.assertTrue(outcome.golden_pass)
         self.assertEqual([], outcome.golden_failures)
 
+    def test_golden_accepts_uncertainty_without_treating_it_as_confirmed_details(self) -> None:
+        case = filter_cases(load_suite("evals/cases.yaml"), case_id="ADVERSARIAL05")[0]
+        payload = _valid_payload()
+        payload["winning_option"] = "Do not buy it without proof."
+        payload["final_output"] = (
+            "Cannot confirm current facts without search; verify before acting. "
+            "Do not buy it without demonstrable proof of functionality and safety."
+        )
+        payload["final_recommendations"] = [
+            {
+                "proposer": "A",
+                "recommendation": "Do not buy it without proof.",
+                "short_reasoning": "Cannot confirm product details without search; verify first.",
+                "pros": ["Safer"],
+                "cons": [],
+                "confidence": 10,
+            }
+        ]
+        result = _case_result(case, score=80, passed=True, failures=[])
+        result.execution.json_payload = payload
+        datasets = load_golden_datasets("evals/golden")
+
+        outcome = golden_score(case, result, datasets)
+
+        self.assertTrue(outcome.golden_pass)
+        self.assertEqual([], outcome.golden_failures)
+
+    def test_golden_accepts_equivalence_when_grouped_without_literal_word(self) -> None:
+        case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE07")[0]
+        payload = _valid_payload()
+        payload["winning_option"] = "Pizza"
+        payload["final_output"] = "Pizza is the chosen option and clear winner."
+        payload["recommendation_groups"] = [
+            {
+                "canonical_option": "Pizza",
+                "proposers": ["A", "B"],
+                "member_recommendations": ["Pizza", "Italian flatbread with cheese and tomato sauce"],
+                "reason": "Grouped by normalized recommendation text.",
+            }
+        ]
+        result = _case_result(case, score=80, passed=True, failures=[])
+        result.execution.json_payload = payload
+        datasets = load_golden_datasets("evals/golden")
+
+        outcome = golden_score(case, result, datasets)
+
+        self.assertTrue(outcome.golden_pass)
+        self.assertEqual([], outcome.golden_failures)
+
     def test_judge_payload_parsing(self) -> None:
         parsed = parse_judge_payload(
             {
@@ -235,7 +316,7 @@ class ScoringTests(unittest.TestCase):
         self.assertEqual(["clear"], parsed.strengths)
         self.assertIsNone(parsed.error)
 
-    def test_judge_payload_normalizes_ten_point_scale(self) -> None:
+    def test_judge_payload_rejects_ten_point_scale(self) -> None:
         parsed = parse_judge_payload(
             {
                 "score": 9,
@@ -248,9 +329,58 @@ class ScoringTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(90, parsed.score)
-        self.assertIn("normalized from a 1-10 scale", parsed.weaknesses[0])
-        self.assertIsNone(parsed.error)
+        self.assertIsNone(parsed.score)
+        self.assertIn("1-10 scale", parsed.error or "")
+
+    def test_judge_prompt_declares_one_to_one_hundred_scale_before_evidence(self) -> None:
+        case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
+        prompt = build_judge_prompt(_case_result(case, 80, True, []))
+
+        scale_index = prompt.index("Score on a 1-100 integer scale")
+        evidence_index = prompt.index('"case"')
+        self.assertLess(scale_index, evidence_index)
+        self.assertIn("Do not use a 1-10 scale", prompt[:evidence_index])
+
+    def test_judge_retries_once_after_ten_point_scale(self) -> None:
+        from evals import judges
+
+        class Response:
+            def __init__(self, payload: dict) -> None:
+                self.payload = payload
+
+        case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
+        payloads = [
+            {
+                "score": 9,
+                "pass": True,
+                "reasoning": "Excellent.",
+                "strengths": ["clear"],
+                "weaknesses": [],
+                "safety_concerns": [],
+                "regression_risk": "low",
+            },
+            {
+                "score": 90,
+                "pass": True,
+                "reasoning": "Excellent.",
+                "strengths": ["clear"],
+                "weaknesses": [],
+                "safety_concerns": [],
+                "regression_risk": "low",
+            },
+        ]
+        prompts: list[str] = []
+
+        async def fake_run_member(config, member, prompt, schema_path, phase, web_search):
+            prompts.append(prompt)
+            return Response(payloads.pop(0))
+
+        with patch.object(judges, "run_member", side_effect=fake_run_member):
+            judged = judges.judge_result(_case_result(case, 80, True, []), "ollama", "qwen3:32b")
+
+        self.assertEqual(90, judged.score)
+        self.assertEqual(2, len(prompts))
+        self.assertIn("previous response used a 1-10 style score", prompts[1])
 
     def test_load_judge_config_from_yaml(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -260,7 +390,8 @@ class ScoringTests(unittest.TestCase):
                 "model: qwen3:32b\n"
                 "options:\n"
                 "  temperature: 0.2\n"
-                "  seed: 123\n",
+                "  seed: 123\n"
+                "  num_ctx: 16384\n",
                 encoding="utf-8",
             )
 
@@ -268,7 +399,7 @@ class ScoringTests(unittest.TestCase):
 
         self.assertEqual("ollama", config.provider)
         self.assertEqual("qwen3:32b", config.model)
-        self.assertEqual({"temperature": 0.2, "seed": 123}, config.options)
+        self.assertEqual({"temperature": 0.2, "seed": 123, "num_ctx": 16384}, config.options)
 
     def test_load_judge_config_rejects_invalid_options(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -297,14 +428,30 @@ class ScoringTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "seed"):
                 load_judge_config(path)
 
+            path.write_text(
+                "provider: ollama\n"
+                "model: qwen3:32b\n"
+                "options:\n"
+                "  temperature: 0.3\n"
+                "  seed: 42\n"
+                "  num_ctx: large\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "num_ctx"):
+                load_judge_config(path)
+
     def test_judge_config_merges_model_and_options_into_provider_config(self) -> None:
-        config = _judge_config("ollama", "qwen3:32b", {"temperature": 0.1, "seed": 7})
+        config = _judge_config(
+            "ollama", "qwen3:32b", {"temperature": 0.1, "seed": 7, "num_ctx": 16384}
+        )
         provider = config["model_providers"]["ollama"]
 
         self.assertTrue(provider["enabled"])
         self.assertIn("qwen3:32b", provider["static_models"])
         self.assertEqual(0.1, provider["options"]["temperature"])
         self.assertEqual(7, provider["options"]["seed"])
+        self.assertEqual(16384, provider["options"]["num_ctx"])
 
 
 class RunnerTests(unittest.TestCase):
@@ -440,6 +587,140 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(0, exit_code)
             self.assertTrue((Path(tmp) / "previous.json").exists())
             self.assertEqual("# Previous\n", (Path(tmp) / "previous.md").read_text(encoding="utf-8"))
+
+    def test_failed_only_reruns_only_failed_cases_from_report(self) -> None:
+        cases = load_suite("evals/cases.yaml")
+        smoke01 = filter_cases(cases, case_id="SMOKE01")[0]
+        smoke02 = filter_cases(cases, case_id="SMOKE02")[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            failed_report = Path(tmp) / "source.json"
+            output = Path(tmp) / "latest.json"
+            markdown = Path(tmp) / "latest.md"
+            failed_report.write_text(
+                json.dumps(
+                    _report_payload(
+                        _case_result(smoke01, score=80, passed=True, failures=[]),
+                        _case_result(smoke02, score=60, passed=False, failures=[]),
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+            with redirect_stdout(io.StringIO()):
+                exit_code = main(
+                    [
+                        "--failed-only",
+                        "--failed-report",
+                        str(failed_report),
+                        "--timeout-seconds",
+                        "5",
+                        "--council-cmd",
+                        _mock_council_command(_valid_payload()),
+                        "--output",
+                        str(output),
+                        "--markdown",
+                        str(markdown),
+                    ]
+                )
+
+            report = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(["SMOKE02"], [item["case"]["id"] for item in report["results"]])
+
+    def test_failed_only_preserves_failed_repeat_count(self) -> None:
+        case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
+        passed_repeat = _case_result(case, score=80, passed=True, failures=[])
+        failed_repeat = _case_result(case, score=60, passed=False, failures=[])
+        failed_repeat.repeat_index = 2
+        with tempfile.TemporaryDirectory() as tmp:
+            failed_report = Path(tmp) / "source.json"
+            output = Path(tmp) / "latest.json"
+            markdown = Path(tmp) / "latest.md"
+            failed_report.write_text(
+                json.dumps(_report_payload(passed_repeat, failed_repeat)),
+                encoding="utf-8",
+            )
+
+            with redirect_stdout(io.StringIO()):
+                exit_code = main(
+                    [
+                        "--failed-only",
+                        "--failed-report",
+                        str(failed_report),
+                        "--timeout-seconds",
+                        "5",
+                        "--council-cmd",
+                        _mock_council_command(_valid_payload()),
+                        "--output",
+                        str(output),
+                        "--markdown",
+                        str(markdown),
+                    ]
+                )
+
+            report = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(["SMOKE01"], [item["case"]["id"] for item in report["results"]])
+
+    def test_failed_only_applies_category_filter_after_failed_selection(self) -> None:
+        cases = load_suite("evals/cases.yaml")
+        smoke01 = filter_cases(cases, case_id="SMOKE01")[0]
+        safety05 = filter_cases(cases, case_id="SAFETY05")[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            failed_report = Path(tmp) / "source.json"
+            output = Path(tmp) / "latest.json"
+            markdown = Path(tmp) / "latest.md"
+            failed_report.write_text(
+                json.dumps(
+                    _report_payload(
+                        _case_result(smoke01, score=60, passed=False, failures=[]),
+                        _case_result(safety05, score=40, passed=False, failures=[]),
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+            with redirect_stdout(io.StringIO()):
+                exit_code = main(
+                    [
+                        "--failed-only",
+                        "--failed-report",
+                        str(failed_report),
+                        "--category",
+                        "safety",
+                        "--timeout-seconds",
+                        "5",
+                        "--council-cmd",
+                        _mock_council_command(_valid_payload()),
+                        "--output",
+                        str(output),
+                        "--markdown",
+                        str(markdown),
+                    ]
+                )
+
+            report = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(0, exit_code)
+        self.assertEqual(["SAFETY05"], [item["case"]["id"] for item in report["results"]])
+
+    def test_failed_only_rejects_skip_mode(self) -> None:
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            main(["--skip", "--golden", "--failed-only"])
+
+    def test_failed_only_errors_when_report_has_no_failures(self) -> None:
+        case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            failed_report = Path(tmp) / "source.json"
+            failed_report.write_text(
+                json.dumps(_report_payload(_case_result(case, score=80, passed=True, failures=[]))),
+                encoding="utf-8",
+            )
+
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                main(["--failed-only", "--failed-report", str(failed_report)])
 
     def test_main_quiet_suppresses_progress(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -603,14 +884,14 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual("ollama", judge_mock.call_args.kwargs["provider"])
             self.assertEqual("qwen3:32b", judge_mock.call_args.kwargs["model"])
             self.assertEqual(
-                {"temperature": 0.3, "seed": 42},
+                {"temperature": 0.3, "seed": 42, "num_ctx": 16384},
                 judge_mock.call_args.kwargs["options"],
             )
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(90, payload["results"][0]["judge_score"])
             self.assertEqual(82, payload["results"][0]["combined_score"])
 
-    def test_skip_normalizes_legacy_ten_point_judge_score(self) -> None:
+    def test_skip_rejects_legacy_ten_point_judge_score(self) -> None:
         case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
         with tempfile.TemporaryDirectory() as tmp:
             input_report = Path(tmp) / "input.json"
@@ -639,9 +920,10 @@ class RunnerTests(unittest.TestCase):
             payload = json.loads(output.read_text(encoding="utf-8"))
 
         self.assertEqual(0, exit_code)
-        self.assertEqual(90, payload["results"][0]["judge_score"])
-        self.assertEqual(87, payload["results"][0]["combined_score"])
-        self.assertIn("normalized from a 1-10 scale", payload["results"][0]["judge_weaknesses"][0])
+        self.assertIsNone(payload["results"][0]["judge_score"])
+        self.assertEqual(86, payload["results"][0]["combined_score"])
+        self.assertIn("1-10 scale", payload["results"][0]["judge_error"])
+        self.assertIn("1-10 scale", payload["results"][0]["judge_weaknesses"][0])
 
     def test_skip_judge_provider_and_model_cli_override_config(self) -> None:
         case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
@@ -678,7 +960,10 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("LLM judge: 1 run(s), provider=codex model=gpt-5.4-mini timeout=300s", rendered)
         self.assertEqual("codex", judge_mock.call_args.kwargs["provider"])
         self.assertEqual("gpt-5.4-mini", judge_mock.call_args.kwargs["model"])
-        self.assertEqual({"temperature": 0.3, "seed": 42}, judge_mock.call_args.kwargs["options"])
+        self.assertEqual(
+            {"temperature": 0.3, "seed": 42, "num_ctx": 16384},
+            judge_mock.call_args.kwargs["options"],
+        )
 
     def test_skip_judge_error_progress_and_verbose_reasoning(self) -> None:
         case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]

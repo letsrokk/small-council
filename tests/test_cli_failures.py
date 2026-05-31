@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -289,6 +290,11 @@ class CliMainFailureMessageTests(unittest.TestCase):
         self.assertIn("Log: runtime/logs/research-aurelia.log", rendered)
         self.assertNotIn("codex login", rendered)
         self.assertNotIn("You've hit your usage limit", rendered)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual("failed", payload["status"])
+        self.assertIsNone(payload["winning_option"])
+        self.assertIn("Codex usage limit reached", payload["final_output"])
+        self.assertEqual([], payload["votes"])
 
 
 if __name__ == "__main__":

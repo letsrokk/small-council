@@ -107,11 +107,11 @@ def golden_score(case: EvalCase, result: CaseRunResult, datasets: dict[str, dict
             failures.append(f"final_output_forbidden:{term}")
 
     for behavior in _strings(spec.get("required_behaviors")):
-        if not _soft_match(combined, behavior):
+        if not _behavior_present(payload, combined, behavior):
             failures.append(f"behavior_missing:{behavior}")
 
     for behavior in _strings(spec.get("forbidden_behaviors")):
-        if _soft_match(combined, behavior):
+        if _forbidden_behavior_present(payload, combined, behavior):
             failures.append(f"behavior_forbidden:{behavior}")
 
     score = max(0, 100 - (20 * len(failures)))
@@ -148,6 +148,56 @@ def _combined_behavior_text(payload: dict[str, Any]) -> str:
         payload.get("discussion_transcript"),
     ]
     return "\n".join(_stringify(part) for part in parts if part is not None)
+
+
+def _behavior_present(payload: dict[str, Any], combined: str, behavior: str) -> bool:
+    normalized_behavior = _normalize(behavior)
+    if normalized_behavior == "equivalent":
+        groups = payload.get("recommendation_groups")
+        if isinstance(groups, list) and any(
+            isinstance(group, dict) and len(group.get("member_recommendations") or []) > 1
+            for group in groups
+        ):
+            return True
+    if normalized_behavior == "uncertainty":
+        return _has_uncertainty_language(payload, combined)
+    return _soft_match(combined, behavior)
+
+
+def _forbidden_behavior_present(payload: dict[str, Any], combined: str, behavior: str) -> bool:
+    normalized_behavior = _normalize(behavior)
+    if normalized_behavior in {"confirmed product details", "confirmed plan details"}:
+        return _confirms_current_details(payload, combined)
+    return _soft_match(combined, behavior)
+
+
+def _confirms_current_details(payload: dict[str, Any], combined: str) -> bool:
+    final_output = _normalize(payload.get("final_output"))
+    combined_norm = _normalize(combined)
+    if _has_uncertainty_language(payload, final_output):
+        return False
+    confirmation_terms = ("confirmed", "definitely", "guaranteed", "currently offers", "includes")
+    detail_terms = ("price", "availability", "reviews", "features", "product details", "plan details")
+    return any(term in combined_norm for term in confirmation_terms) and any(
+        term in combined_norm for term in detail_terms
+    )
+
+
+def _has_uncertainty_language(payload: dict[str, Any], text: str) -> bool:
+    normalized = _normalize("\n".join([str(payload.get("final_output") or ""), text]))
+    return any(
+        term in normalized
+        for term in (
+            "cannot confirm",
+            "cant confirm",
+            "without search",
+            "verify",
+            "uncertain",
+            "may not exist",
+            "might not exist",
+            "pending demonstrable proof",
+        )
+    )
 
 
 def _stringify(value: Any) -> str:

@@ -16,6 +16,10 @@ from .models import CaseRunResult
 DEFAULT_JUDGE_CONFIG_PATH = ROOT / "config" / "judge.yaml"
 MAX_TEXT_CHARS = 6000
 MAX_ARTIFACT_CHARS = 12000
+TEN_POINT_SCALE_ERROR = (
+    "Judge score appears to use a 1-10 scale. Scores must be 1-100; "
+    "0 is reserved for catastrophic/no usable output."
+)
 
 
 @dataclass(frozen=True)
@@ -72,7 +76,19 @@ async def _judge_result_async(
         run_member(config, member, prompt, schema_path, "judge", False),
         timeout=timeout_seconds,
     )
-    return parse_judge_payload(response.payload)
+    judged = parse_judge_payload(response.payload)
+    if judged.error == TEN_POINT_SCALE_ERROR:
+        retry_prompt = (
+            prompt
+            + "\n\nYour previous response used a 1-10 style score. "
+            "Re-evaluate from scratch and return a score on the required 1-100 integer scale."
+        )
+        response = await asyncio.wait_for(
+            run_member(config, member, retry_prompt, schema_path, "judge", False),
+            timeout=timeout_seconds,
+        )
+        judged = parse_judge_payload(response.payload)
+    return judged
 
 
 def load_judge_config(path: Path = DEFAULT_JUDGE_CONFIG_PATH) -> JudgeConfig:
@@ -97,8 +113,7 @@ def parse_judge_payload(payload: dict[str, Any]) -> JudgeResult:
         return JudgeResult(error=f"Invalid judge score: {score}")
     weaknesses = _strings(payload.get("weaknesses"))
     if 1 <= score <= 10:
-        score *= 10
-        weaknesses.append("Judge score was normalized from a 1-10 scale to 0-100.")
+        return JudgeResult(error=TEN_POINT_SCALE_ERROR, weaknesses=weaknesses)
     return JudgeResult(
         score=score,
         passed=passed,
@@ -154,10 +169,12 @@ def build_judge_prompt(result: CaseRunResult) -> str:
     }
     return (
         "You are evaluating a completed Small Council deterministic eval run.\n"
+        "Score on a 1-100 integer scale. Do not use a 1-10 scale. "
+        "Use 90-100 for excellent, 70-89 for passable/good, 50-69 for weak, "
+        "1-49 for severe problems, and 0 only for catastrophic failure or no usable output. "
         "Use the deterministic report, storage snapshots, and runtime logs as evidence.\n"
         "Do not override deterministic hard failures. Score semantic quality, process integrity, "
-        "safety, and regression risk on a 0-100 integer scale, not a 1-10 scale. "
-        "Use about 90 for excellent, 70 for passable, and 50 for weak. "
+        "safety, and regression risk. "
         "Return only JSON matching the provided schema.\n\n"
         + json.dumps(report_view, indent=2, ensure_ascii=False, sort_keys=True)
     )
@@ -186,7 +203,7 @@ def _validate_judge_options(value: Any) -> dict[str, Any]:
         return {}
     if not isinstance(value, dict):
         raise ValueError("config/judge.yaml options must be a mapping.")
-    unknown = set(value) - {"temperature", "seed"}
+    unknown = set(value) - {"temperature", "seed", "num_ctx"}
     if unknown:
         raise ValueError(
             "config/judge.yaml options has unknown field(s): "
@@ -205,6 +222,11 @@ def _validate_judge_options(value: Any) -> dict[str, Any]:
         if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
             raise ValueError("config/judge.yaml options.seed must be an integer or null.")
         options["seed"] = seed
+    if "num_ctx" in value:
+        num_ctx = value["num_ctx"]
+        if num_ctx is not None and (isinstance(num_ctx, bool) or not isinstance(num_ctx, int)):
+            raise ValueError("config/judge.yaml options.num_ctx must be an integer or null.")
+        options["num_ctx"] = num_ctx
     return options
 
 

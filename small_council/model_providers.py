@@ -210,6 +210,11 @@ def _validate_provider_options(provider: str, options: dict[str, Any]) -> dict[s
             if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
                 raise ValueError("model_providers.ollama.options.seed must be an integer or null.")
             validated["seed"] = seed
+        if "num_ctx" in options:
+            num_ctx = options["num_ctx"]
+            if num_ctx is not None and (isinstance(num_ctx, bool) or not isinstance(num_ctx, int)):
+                raise ValueError("model_providers.ollama.options.num_ctx must be an integer or null.")
+            validated["num_ctx"] = num_ctx
         return validated
     if provider == "codex":
         effort = str(options.get("reasoning_effort", "medium"))
