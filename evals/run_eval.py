@@ -14,7 +14,7 @@ from typing import Any, TextIO
 
 from small_council.config import load_config, save_config
 
-from .golden import golden_score, load_golden_datasets, resolve_golden, validate_golden_references
+from .golden import golden_score, load_golden_datasets, validate_golden_references
 from .judges import JudgeConfig, judge_result, load_judge_config
 from .models import (
     CaseRunResult,
@@ -31,6 +31,7 @@ from .utils import extract_last_valid_json, filter_cases, git_commit, load_suite
 
 
 DEFAULT_COUNCIL_CMD = "./council --secretary local"
+GOLDEN_DIR = Path("evals/golden")
 
 
 @dataclass(frozen=True)
@@ -51,8 +52,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--timeout-seconds", type=float, default=600)
     parser.add_argument("--council-cmd", default=DEFAULT_COUNCIL_CMD)
-    parser.add_argument("--golden", action="store_true", help="Run golden validation after deterministic eval.")
-    parser.add_argument("--golden-dir", default="evals/golden")
     parser.add_argument("--golden-weight", type=float)
     parser.add_argument("--llm-judge", action="store_true", help="Run LLM judge after deterministic/golden eval.")
     parser.add_argument("--judge-provider")
@@ -91,8 +90,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--golden-weight must be non-negative")
     if args.judge_weight is not None and args.judge_weight < 0:
         parser.error("--judge-weight must be non-negative")
-    if args.skip and not (args.golden or args.llm_judge):
-        parser.error("--skip requires --golden and/or --llm-judge")
+    if args.skip and not args.llm_judge:
+        parser.error("--skip requires --llm-judge")
     if args.skip and args.failed_only:
         parser.error("--failed-only cannot be used with --skip")
 
@@ -130,9 +129,12 @@ def main(argv: list[str] | None = None) -> int:
             )
         if not cases:
             parser.error("No cases matched the selected filters.")
+        golden_datasets = load_golden_datasets(GOLDEN_DIR) if _has_golden_cases(cases) else None
+        if golden_datasets is not None:
+            validate_golden_references(cases, golden_datasets)
         previous_json_path = Path(args.compare) if args.compare else _backup_previous_report(args.output)
         _backup_previous_report(args.markdown)
-        report = _run_deterministic(args, cases, suite_path, suite_start)
+        report = _run_deterministic(args, cases, suite_path, suite_start, golden_datasets)
 
     _run_post_processing(args, report)
     _apply_blended_scores(args, report)
@@ -148,6 +150,7 @@ def _run_deterministic(
     cases: list[EvalCase],
     suite_path: Path,
     suite_start: float,
+    golden_datasets: dict[str, dict[str, Any]] | None,
 ) -> EvalReport:
     metadata = EvalRunMetadata(
         timestamp=datetime.now(timezone.utc).isoformat(),
@@ -202,9 +205,25 @@ def _run_deterministic(
                 passed=deterministic_score >= PASS_THRESHOLD
                 and not validation.hard_failures,
             )
+            if golden_datasets is not None:
+                _apply_golden_score(result, golden_datasets)
             results.append(result)
             _print_case_result(args, result, suite_start, len(results), total_runs)
     return EvalReport(metadata=metadata, results=results)
+
+
+def _has_golden_cases(cases: list[EvalCase]) -> bool:
+    return any(case.golden_ref or case.golden is not None for case in cases)
+
+
+def _apply_golden_score(
+    result: CaseRunResult,
+    datasets: dict[str, dict[str, Any]],
+) -> None:
+    outcome = golden_score(result.case, result, datasets)
+    result.golden_score = outcome.golden_score
+    result.golden_failures = outcome.golden_failures
+    result.golden_pass = outcome.golden_pass
 
 
 def execute_case(
@@ -268,23 +287,6 @@ def _benchmark_env(config_path: Path | None = None) -> dict[str, str]:
 
 
 def _run_post_processing(args: argparse.Namespace, report: EvalReport) -> None:
-    if args.golden:
-        phase_start = time.monotonic()
-        datasets = load_golden_datasets(args.golden_dir)
-        validate_golden_references([result.case for result in report.results], datasets)
-        golden_results = [
-            result for result in report.results if resolve_golden(result.case, datasets) is not None
-        ]
-        total_runs = len(golden_results)
-        _print_golden_start(args, total_runs)
-        for index, result in enumerate(golden_results, start=1):
-            _print_golden_case_start(args, index, total_runs, result, phase_start)
-            outcome = golden_score(result.case, result, datasets)
-            result.golden_score = outcome.golden_score
-            result.golden_failures = outcome.golden_failures
-            result.golden_pass = outcome.golden_pass
-            _print_golden_result(args, index, total_runs, result, phase_start)
-        _print_golden_complete(args, report.results, phase_start)
     if args.llm_judge:
         total_runs = len(report.results)
         phase_start = time.monotonic()
@@ -665,70 +667,6 @@ def _print_skip_start(args: argparse.Namespace, input_report: Path, total_runs: 
     _emit(f"Input report: {input_report}")
     _emit(f"Loaded: {total_runs} run(s)")
     _emit(f"Reports: {args.output}, {args.markdown}")
-    _emit("")
-
-
-def _print_golden_start(args: argparse.Namespace, total_runs: int) -> None:
-    if args.quiet:
-        return
-    _emit(f"Golden validation: {total_runs} run(s), dir={args.golden_dir}")
-
-
-def _print_golden_case_start(
-    args: argparse.Namespace,
-    run_index: int,
-    total_runs: int,
-    result: CaseRunResult,
-    phase_start: float,
-) -> None:
-    if args.quiet:
-        return
-    elapsed, eta = _progress_timing(phase_start, run_index - 1, total_runs)
-    _emit(
-        f"[golden {run_index}/{total_runs}] {result.case.id} repeat {result.repeat_index} "
-        f"elapsed={elapsed} eta={eta}"
-    )
-
-
-def _print_golden_result(
-    args: argparse.Namespace,
-    run_index: int,
-    total_runs: int,
-    result: CaseRunResult,
-    phase_start: float,
-) -> None:
-    if args.quiet:
-        return
-    elapsed, eta = _progress_timing(phase_start, run_index, total_runs)
-    if result.golden_pass is True:
-        status = "PASS"
-    elif result.golden_pass is False:
-        status = "FAIL"
-    else:
-        status = "SKIP"
-    score = result.golden_score if result.golden_score is not None else "-"
-    failures = ",".join(result.golden_failures) or "-"
-    _emit(f"  {status} score={score} elapsed={elapsed} eta={eta} failures={failures}")
-    if args.verbose:
-        for failure in result.golden_failures:
-            _emit(f"  golden failure: {failure}")
-    _emit("")
-
-
-def _print_golden_complete(
-    args: argparse.Namespace,
-    results: list[CaseRunResult],
-    phase_start: float,
-) -> None:
-    if args.quiet:
-        return
-    scored = [result for result in results if result.golden_score is not None]
-    average = _average(result.golden_score for result in scored)
-    pass_rate = _rate(result.golden_pass for result in scored)
-    _emit(
-        f"Golden complete: average={average:.1f} pass_rate={pass_rate:.1f}% "
-        f"elapsed={_format_duration(time.monotonic() - phase_start)}"
-    )
     _emit("")
 
 

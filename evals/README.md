@@ -32,7 +32,7 @@ Re-run only cases that failed in the latest report:
 ```bash
 ./eval --failed-only
 ./eval --failed-only --failed-report evals/reports/previous.json
-./eval --failed-only --golden --llm-judge
+./eval --failed-only --llm-judge
 ```
 
 Useful options:
@@ -71,11 +71,10 @@ By default, `./eval` prints progress to stdout:
 - suite path, selected case count, repeat count, total runs, and report paths at startup
 - one line before each case run with elapsed time and ETA
 - one PASS/FAIL result line with score, duration, JSON status, elapsed time, ETA, and hard failures when present
-- when `--golden` is enabled, a golden phase header, one `[golden i/N]` line per run with elapsed time and ETA, one result line, and a completion summary
 - when `--llm-judge` is enabled, a judge phase header with provider/model, one `[judge i/N]` line before each judge call with elapsed time and ETA, one result line, and a completion summary
 - a final summary with average score, pass rate, JSON validity, total elapsed time, written report paths, and comparison to the previous report when available
 
-Use `--quiet` for report-only execution with no progress output, including golden and judge post-processing:
+Use `--quiet` for report-only execution with no progress output, including judge post-processing:
 
 ```bash
 ./eval --quiet
@@ -95,21 +94,22 @@ Verbosity levels:
 
 ## Golden Validation and LLM Judge
 
-Golden validation and LLM judging are post-processing phases. The deterministic
-eval report is produced first; golden validation runs next when enabled; the
-LLM judge runs last when enabled. Deterministic hard failures remain the
-authoritative release gate.
+Golden validation runs automatically during fresh eval execution for any case
+with `golden_ref` or inline `golden` data. Golden datasets are always loaded
+from `evals/golden`; there is no CLI option to select a different directory.
+The LLM judge remains an optional post-processing phase. Deterministic hard
+failures remain the authoritative release gate.
 
-Run deterministic eval plus golden validation:
+Run a golden-backed case:
 
 ```bash
-./eval --case SMOKE01 --golden
+./eval --case SMOKE01
 ```
 
 Run deterministic eval plus golden validation and an LLM judge:
 
 ```bash
-./eval --case SMOKE01 --golden --llm-judge
+./eval --case SMOKE01 --llm-judge
 ```
 
 The judge uses the existing council model provider stack and reads its default
@@ -129,20 +129,18 @@ Override provider and model from the CLI when needed:
 ./eval --llm-judge --judge-provider codex --judge-model gpt-5.4-mini
 ```
 
-Re-run post-processing against an existing deterministic report without
-executing `./council`:
+Re-run judge post-processing against an existing deterministic report without
+executing `./council`. `--skip` does not rerun deterministic or golden
+validation:
 
 ```bash
-./eval --skip --golden --input-report evals/reports/latest.json
-./eval --skip --golden --llm-judge --input-report evals/reports/latest.json
+./eval --skip --llm-judge --input-report evals/reports/latest.json
 ```
 
-Useful post-processing options:
+Useful judge and scoring options:
 
 ```bash
 ./eval \
-  --golden \
-  --golden-dir evals/golden \
   --golden-weight 0.30 \
   --llm-judge \
   --judge-timeout-seconds 300 \

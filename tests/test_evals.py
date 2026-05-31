@@ -37,6 +37,7 @@ from evals.run_eval import (
     _format_duration,
     _progress_timing,
     execute_case,
+    load_json_report,
     main,
 )
 from evals.scorers import score_case, validate_result
@@ -560,6 +561,37 @@ class RunnerTests(unittest.TestCase):
             self.assertIn("Previous comparison", rendered)
             self.assertIn("previous report: none", rendered)
             self.assertIn(f"wrote: {output}", rendered)
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(100, payload["results"][0]["golden_score"])
+            self.assertTrue(payload["results"][0]["golden_pass"])
+            self.assertEqual(82, payload["results"][0]["combined_score"])
+
+    def test_main_leaves_golden_fields_unset_for_case_without_golden_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "latest.json"
+            markdown = Path(tmp) / "latest.md"
+
+            with redirect_stdout(io.StringIO()):
+                exit_code = main(
+                    [
+                        "--case",
+                        "VOTING04",
+                        "--timeout-seconds",
+                        "5",
+                        "--council-cmd",
+                        _mock_council_command(_valid_payload()),
+                        "--output",
+                        str(output),
+                        "--markdown",
+                        str(markdown),
+                    ]
+                )
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertEqual(0, exit_code)
+        self.assertIsNone(payload["results"][0]["golden_score"])
+        self.assertIsNone(payload["results"][0]["golden_pass"])
 
     def test_main_copies_latest_reports_to_previous_before_run(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -708,7 +740,7 @@ class RunnerTests(unittest.TestCase):
 
     def test_failed_only_rejects_skip_mode(self) -> None:
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
-            main(["--skip", "--golden", "--failed-only"])
+            main(["--skip", "--llm-judge", "--failed-only"])
 
     def test_failed_only_errors_when_report_has_no_failures(self) -> None:
         case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
@@ -775,54 +807,34 @@ class RunnerTests(unittest.TestCase):
             self.assertIn("warning:", rendered)
             self.assertIn("stderr: model failed loudly", rendered)
 
-    def test_skip_runs_golden_against_existing_report(self) -> None:
+    def test_skip_rejects_without_llm_judge(self) -> None:
         case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "latest.json"
-            markdown = Path(tmp) / "latest.md"
             output.write_text(json.dumps(_report_payload(_case_result(case, 80, True, []))), encoding="utf-8")
 
-            stdout = io.StringIO()
-            with redirect_stdout(stdout):
-                exit_code = main(
-                    [
-                        "--skip",
-                        "--golden",
-                        "--input-report",
-                        str(output),
-                        "--output",
-                        str(output),
-                        "--markdown",
-                        str(markdown),
-                    ]
-                )
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                main(["--skip", "--input-report", str(output)])
 
-            self.assertEqual(0, exit_code)
-            rendered = stdout.getvalue()
-            self.assertIn("Golden validation: 1 run(s), dir=evals/golden", rendered)
-            self.assertIn("[golden 1/1] SMOKE01 repeat 1 elapsed=", rendered)
-            self.assertIn("eta=", rendered)
-            self.assertIn("PASS score=100 elapsed=", rendered)
-            self.assertIn("Golden complete: average=100.0 pass_rate=100.0%", rendered)
-            payload = json.loads(output.read_text(encoding="utf-8"))
-            self.assertEqual(100, payload["results"][0]["golden_score"])
-            self.assertEqual(80, payload["results"][0]["deterministic_score"])
-
-    def test_skip_omits_unscored_golden_case_progress(self) -> None:
-        case = filter_cases(load_suite("evals/cases.yaml"), case_id="VOTING04")[0]
+    def test_skip_does_not_run_golden_against_existing_report(self) -> None:
+        case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
         with tempfile.TemporaryDirectory() as tmp:
+            input_report = Path(tmp) / "input.json"
             output = Path(tmp) / "latest.json"
             markdown = Path(tmp) / "latest.md"
-            output.write_text(json.dumps(_report_payload(_case_result(case, 80, True, []))), encoding="utf-8")
+            input_report.write_text(json.dumps(_report_payload(_case_result(case, 80, True, []))), encoding="utf-8")
+            judged = JudgeResult(score=90, passed=True, regression_risk="low")
 
-            stdout = io.StringIO()
-            with redirect_stdout(stdout):
+            with (
+                patch("evals.run_eval.judge_result", return_value=judged),
+                redirect_stdout(stdout := io.StringIO()),
+            ):
                 exit_code = main(
                     [
                         "--skip",
-                        "--golden",
                         "--input-report",
-                        str(output),
+                        str(input_report),
+                        "--llm-judge",
                         "--output",
                         str(output),
                         "--markdown",
@@ -832,12 +844,21 @@ class RunnerTests(unittest.TestCase):
 
             self.assertEqual(0, exit_code)
             rendered = stdout.getvalue()
-            self.assertIn("Golden validation: 0 run(s), dir=evals/golden", rendered)
+            self.assertNotIn("Golden validation", rendered)
             self.assertNotIn("[golden", rendered)
-            self.assertNotIn("SKIP score=-", rendered)
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertIsNone(payload["results"][0]["golden_score"])
             self.assertIsNone(payload["results"][0]["golden_pass"])
+            self.assertEqual(90, payload["results"][0]["judge_score"])
+
+    def test_removed_golden_flags_are_rejected(self) -> None:
+        for flag in ("--golden", "--golden-dir"):
+            with self.subTest(flag=flag):
+                argv = [flag]
+                if flag == "--golden-dir":
+                    argv.append("evals/golden")
+                with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                    main(argv)
 
     def test_skip_runs_mocked_judge_with_default_provider_and_model(self) -> None:
         case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
@@ -895,35 +916,17 @@ class RunnerTests(unittest.TestCase):
         case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
         with tempfile.TemporaryDirectory() as tmp:
             input_report = Path(tmp) / "input.json"
-            output = Path(tmp) / "latest.json"
-            markdown = Path(tmp) / "latest.md"
             report = _report_payload(_case_result(case, 80, True, []))
             report["results"][0]["judge_score"] = 9
             report["results"][0]["judge_pass"] = True
             report["results"][0]["judge_weaknesses"] = []
             input_report.write_text(json.dumps(report), encoding="utf-8")
 
-            with redirect_stdout(io.StringIO()):
-                exit_code = main(
-                    [
-                        "--skip",
-                        "--golden",
-                        "--input-report",
-                        str(input_report),
-                        "--output",
-                        str(output),
-                        "--markdown",
-                        str(markdown),
-                    ]
-                )
+            loaded = load_json_report(input_report)
 
-            payload = json.loads(output.read_text(encoding="utf-8"))
-
-        self.assertEqual(0, exit_code)
-        self.assertIsNone(payload["results"][0]["judge_score"])
-        self.assertEqual(86, payload["results"][0]["combined_score"])
-        self.assertIn("1-10 scale", payload["results"][0]["judge_error"])
-        self.assertIn("1-10 scale", payload["results"][0]["judge_weaknesses"][0])
+        self.assertIsNone(loaded.results[0].judge_score)
+        self.assertIn("1-10 scale", loaded.results[0].judge_error or "")
+        self.assertIn("1-10 scale", loaded.results[0].judge_weaknesses[0])
 
     def test_skip_judge_provider_and_model_cli_override_config(self) -> None:
         case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
@@ -999,7 +1002,7 @@ class RunnerTests(unittest.TestCase):
             self.assertIn("error=judge provider unavailable", rendered)
             self.assertIn("judge error: judge provider unavailable", rendered)
 
-    def test_skip_quiet_suppresses_golden_and_judge_progress(self) -> None:
+    def test_skip_quiet_suppresses_judge_progress(self) -> None:
         case = filter_cases(load_suite("evals/cases.yaml"), case_id="SMOKE01")[0]
         with tempfile.TemporaryDirectory() as tmp:
             input_report = Path(tmp) / "input.json"
@@ -1014,7 +1017,6 @@ class RunnerTests(unittest.TestCase):
                 exit_code = main(
                     [
                         "--skip",
-                        "--golden",
                         "--llm-judge",
                         "--quiet",
                         "--input-report",
