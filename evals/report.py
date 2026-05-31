@@ -29,6 +29,7 @@ def render_markdown(report: EvalReport) -> str:
     results = report.results
     average = _average(_effective_score(result) for result in results)
     deterministic_average = _average(result.deterministic_score for result in results)
+    deterministic_pass_rate = _rate(_deterministic_passed(result) for result in results)
     pass_rate = _rate(result.passed for result in results)
     json_rate = _rate(result.validation.valid_json for result in results)
     safety_results = [result for result in results if result.case.category == "safety"]
@@ -56,7 +57,8 @@ def render_markdown(report: EvalReport) -> str:
         f"| Cases run | {len(results)} |",
         f"| Average score | {average:.1f} |",
         f"| Deterministic average | {deterministic_average:.1f} |",
-        f"| Pass rate | {pass_rate:.1f}% |",
+        f"| Deterministic pass rate | {deterministic_pass_rate:.1f}% |",
+        f"| Combined pass rate | {pass_rate:.1f}% |",
         f"| JSON validity rate | {json_rate:.1f}% |",
         f"| Safety pass rate | {safety_rate:.1f}% |",
         "",
@@ -109,6 +111,7 @@ def render_markdown(report: EvalReport) -> str:
         lines.extend(
             [
                 "",
+                f"Golden average: {_average(result.golden_score for result in golden_results if result.golden_score is not None):.1f}",
                 f"Golden pass rate: {_rate(result.golden_pass for result in golden_results):.1f}%",
             ]
         )
@@ -132,6 +135,14 @@ def render_markdown(report: EvalReport) -> str:
                 f"{_join_cell(result.judge_strengths)} | {_join_cell(result.judge_weaknesses)} | "
                 f"{_join_cell(result.judge_safety_concerns)} | {result.judge_error or '-'} |"
             )
+        judged_results = [result for result in results if result.judge_score is not None]
+        lines.extend(
+            [
+                "",
+                f"Judge average: {_average(result.judge_score for result in judged_results if result.judge_score is not None):.1f}",
+                f"Judge pass rate: {_rate(result.judge_pass for result in judged_results):.1f}%",
+            ]
+        )
 
     if has_combined:
         lines.extend(
@@ -149,6 +160,38 @@ def render_markdown(report: EvalReport) -> str:
                 f"{_score_cell(result.golden_score)} | {_score_cell(result.judge_score)} | "
                 f"{_score_cell(result.combined_score)} |"
             )
+
+    timeout_results = [
+        result
+        for result in results
+        if result.execution.timed_out or "council_crash" in result.validation.hard_failures
+    ]
+    if timeout_results:
+        lines.extend(
+            [
+                "",
+                "## Timeouts And Crashes",
+                "",
+                "| Case | Repeat | Timed out | Exit code | Hard failures | Warning |",
+                "| --- | ---: | --- | ---: | --- | --- |",
+            ]
+        )
+        for result in timeout_results:
+            failures = ", ".join(result.validation.hard_failures) or "-"
+            warning = _join_cell(result.validation.warnings)
+            exit_code = "-" if result.execution.exit_code is None else str(result.execution.exit_code)
+            lines.append(
+                f"| {result.case.id} | {result.repeat_index} | "
+                f"{'yes' if result.execution.timed_out else 'no'} | {exit_code} | "
+                f"{failures} | {warning} |"
+            )
+
+    deterministic_failures = [result for result in results if not _deterministic_passed(result)]
+    if deterministic_failures:
+        lines.extend(["", "## Deterministic Failures", ""])
+        for result in deterministic_failures:
+            details = ", ".join(result.validation.hard_failures or result.validation.warnings) or "Low deterministic score."
+            lines.append(f"- `{result.case.id}` scored {result.deterministic_score}: {details}")
 
     lines.extend(["", "## Top Failures", ""])
     failures = sorted(results, key=_effective_score)[:10]
@@ -186,6 +229,10 @@ def _rate(values) -> float:
 
 def _effective_score(result: CaseRunResult) -> int:
     return result.combined_score if result.combined_score is not None else result.deterministic_score
+
+
+def _deterministic_passed(result: CaseRunResult) -> bool:
+    return result.deterministic_score >= PASS_THRESHOLD and not result.validation.hard_failures
 
 
 def _score_cell(value: int | None) -> str:

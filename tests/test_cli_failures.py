@@ -244,6 +244,60 @@ class CliFailureHandlingTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(vote)
 
+    async def test_vote_round_converts_member_failure_to_abstention(self) -> None:
+        aurelia = _member("Aurelia")
+        bram = _member("Bram")
+        result = type(
+            "Result",
+            (),
+            {
+                "member": aurelia,
+                "payload": {
+                    "voter": "Echo",
+                    "critique": "Option A is better.",
+                    "selected_option": "Option A",
+                    "selected_proposer": "Aurelia",
+                    "reason": "Best fit.",
+                    "self_vote": True,
+                },
+            },
+        )()
+        failure = RuntimeError("vote timed out")
+        secretary = LocalSecretary(io.StringIO())
+        await secretary.start("Pick one")
+
+        with patch.object(
+            cli,
+            "_run_member_with_retries",
+            new=AsyncMock(side_effect=[result, failure]),
+        ):
+            votes = await cli._run_vote_jobs_with_secretary(
+                {"council": {"vote_timeout_seconds": 0}},
+                [
+                    (aurelia, "prompt", Path("schema.json"), "vote", False),
+                    (bram, "prompt", Path("schema.json"), "vote", False),
+                ],
+                secretary,
+                None,
+                [
+                    {
+                        "canonical_option": "Option A",
+                        "proposers": ["Aurelia"],
+                        "member_recommendations": ["Option A"],
+                    }
+                ],
+                [{"proposer": "Aurelia", "recommendation": "Option A"}],
+                0,
+            )
+
+        self.assertEqual(2, len(votes))
+        successful_vote = next(vote for vote in votes if vote["voter"] == "Aurelia")
+        abstention = next(vote for vote in votes if vote["voter"] == "Bram")
+        self.assertEqual("Option A", successful_vote["selected_option"])
+        self.assertEqual("", abstention["selected_option"])
+        self.assertTrue(abstention["abstained"])
+        self.assertIn("vote timed out", abstention["reason"])
+
 
 class CliMainFailureMessageTests(unittest.TestCase):
     def test_unknown_search_setting_is_rejected(self) -> None:

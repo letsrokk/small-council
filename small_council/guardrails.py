@@ -194,11 +194,17 @@ def sanitize_recommendations(
     return sanitized
 
 
-def sanitize_vote(vote: dict[str, Any], recommendations: list[dict[str, Any]]) -> dict[str, Any]:
+def sanitize_vote(
+    vote: dict[str, Any],
+    recommendations: list[dict[str, Any]],
+    voter: str | None = None,
+) -> dict[str, Any]:
     valid_options = {rec.get("recommendation") for rec in recommendations if rec.get("recommendation")}
     updated = dict(vote)
+    if voter:
+        updated["voter"] = voter
     selected = updated.get("selected_option")
-    if selected and selected not in valid_options:
+    if selected and (selected not in valid_options or _compound_option(selected, valid_options)):
         updated["selected_option"] = ""
         updated["selected_proposer"] = ""
         reason = str(updated.get("reason") or "").strip()
@@ -277,6 +283,18 @@ def _ensure_uncertainty(value: Any) -> str:
 def _matches_option(value: Any, options: list[str]) -> bool:
     normalized = _normalize(value)
     return any(_normalize(option) in normalized or normalized in _normalize(option) for option in options)
+
+
+def _compound_option(selected: Any, valid_options: set[Any]) -> bool:
+    selected_norm = _normalize(selected)
+    if not selected_norm:
+        return False
+    matches = [
+        _normalize(option)
+        for option in valid_options
+        if _normalize(option) and _normalize(option) in selected_norm
+    ]
+    return len(set(matches)) > 1
 
 
 def _split_options(value: str) -> list[str]:

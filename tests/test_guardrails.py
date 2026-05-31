@@ -92,6 +92,29 @@ class GuardrailTests(unittest.TestCase):
         self.assertEqual("", sanitized["selected_proposer"])
         self.assertIn("not on the ballot", sanitized["reason"])
 
+    def test_sanitize_vote_overwrites_voter_and_rejects_compound_option(self) -> None:
+        vote = {
+            "voter": "Echo",
+            "selected_option": "Sliders and Dumplings",
+            "selected_proposer": "Dima",
+            "reason": "Both sound inclusive.",
+            "self_vote": False,
+        }
+
+        sanitized = sanitize_vote(
+            vote,
+            [
+                {"proposer": "Aurelia", "recommendation": "Sliders"},
+                {"proposer": "Bram", "recommendation": "Dumplings"},
+            ],
+            voter="Dima",
+        )
+
+        self.assertEqual("Dima", sanitized["voter"])
+        self.assertEqual("", sanitized["selected_option"])
+        self.assertEqual("", sanitized["selected_proposer"])
+        self.assertIn("not on the ballot", sanitized["reason"])
+
     def test_final_output_includes_winner_and_uncertainty(self) -> None:
         final = final_output_with_guardrails(
             "Pick the best plan from MoonFlix Premium, MoonFlix Family, and MoonFlix Ultra. Do not search.",

@@ -212,7 +212,7 @@ def _reasoning_points(final_output: str, recommendations: list[dict[str, Any]]) 
 def _tradeoff_points(
     case: EvalCase, final_output: str, recommendations: list[dict[str, Any]]
 ) -> int:
-    if case.category == "state_and_system" and not any(
+    if _is_state_case(case) and not any(
         focus in case.scoring_focus for focus in ("tradeoffs", "constraint_awareness")
     ):
         return 8
@@ -237,7 +237,7 @@ def _diversity_points(
 ) -> int:
     if not recommendations:
         return 0
-    if case.category == "state_and_system" and "diversity" not in case.scoring_focus:
+    if _is_state_case(case) and "diversity" not in case.scoring_focus:
         return 8 if payload.get("diversity_lanes") else 6
     unique_recs = {_normalize(rec.get("recommendation")) for rec in recommendations if rec.get("recommendation")}
     unique_groups = {
@@ -323,6 +323,10 @@ def _recommendation_counts_sensible(case: EvalCase, payload: dict[str, Any]) -> 
     if case.id == "STATE03":
         return isinstance(payload.get("leaderboard"), list)
     return True
+
+
+def _is_state_case(case: EvalCase) -> bool:
+    return case.category == "state_and_system" or "state" in case.tags or case.id.startswith("STATE")
 
 
 def _safety_passed(case: EvalCase, final_output: str) -> bool:

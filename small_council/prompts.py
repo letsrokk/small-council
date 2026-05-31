@@ -45,6 +45,8 @@ Use the Search Worker when the decision depends on current, external, or missing
 Use the Search Worker when you lack knowledge, are unsure, or need facts from after your training cutoff, including recent dated events even when the date is in the past.
 Do not invent freshness-sensitive details when search is available.
 Produce one concrete recommendation.
+If the user says options are identical, treat them as equivalent and do not invent distinguishing facts.
+If the user asks to choose exactly one option, recommend exactly one of the explicit options.
 Your personality should influence priorities, tone, and risk tolerance.
 Fit your recommendation to your assigned lane.
 If diversity mode is "low", avoid duplicating only the most obvious pick when a similarly good alternative exists.
@@ -99,7 +101,9 @@ Initial recommendations from the council:
 {json.dumps(recommendations, indent=2)}
 
 You are casting the council's first vote after final proposals have already been revised.
-Choose one recommendation. Prefer not to vote for your own proposal; if you do, include a specific justification.
+Choose exactly one recommendation from the listed recommendations.
+Do not combine multiple recommendations into one vote, and do not introduce a new option.
+Prefer not to vote for your own proposal; if you do, include a specific justification.
 Abstain only if there is no responsible choice.
 """
 
@@ -204,7 +208,8 @@ Previous vote rounds:
 {json.dumps(vote_rounds, indent=2)}
 
 Briefly compare only the remaining tied options, then vote for one of them.
-Do not introduce a new option. Do not vote for an eliminated option.
+Choose exactly one remaining tied option.
+Do not combine options. Do not introduce a new option. Do not vote for an eliminated option.
 """
 
 
@@ -269,6 +274,7 @@ Leaderboard:
 Write plain human-readable text in final_output, not JSON or a code block.
 Respect the computed winner and votes exactly.
 If status is "resolved", present the winning option normally.
+If the user said options were identical, say the winner is an arbitrary/equivalent choice rather than inventing a distinction.
 If tie_broken_by is present, say the President broke the tie after the configured runoff rounds.
 If winning_members has more than one member, mention the shared winning proposers by name.
 If status is "unresolved_tie", do not invent a winner. Say no single winner emerged after the configured runoff rounds and present all remaining tied options as equally viable choices.

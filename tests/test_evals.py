@@ -586,6 +586,27 @@ class RunnerTests(unittest.TestCase):
             unreadable.write_text("{not json", encoding="utf-8")
             self.assertIn("previous report: unreadable", _compare_with_previous(unreadable, report)[0])
 
+    def test_markdown_reports_deterministic_golden_judge_and_timeouts_separately(self) -> None:
+        case = load_suite("evals/cases.yaml")[0]
+        timed_out = _case_result(case, score=20, passed=False, failures=["council_crash"])
+        timed_out.execution.timed_out = True
+        timed_out.execution.exit_code = None
+        timed_out.validation.warnings.append("No JSON object start found in stdout.")
+        timed_out.golden_score = 100
+        timed_out.golden_pass = True
+        timed_out.judge_score = 0
+        timed_out.judge_pass = False
+        timed_out.combined_score = 20
+
+        markdown = render_markdown(_report(timed_out))
+
+        self.assertIn("Deterministic pass rate", markdown)
+        self.assertIn("Combined pass rate", markdown)
+        self.assertIn("Golden average: 100.0", markdown)
+        self.assertIn("Judge average: 0.0", markdown)
+        self.assertIn("## Timeouts And Crashes", markdown)
+        self.assertIn("## Deterministic Failures", markdown)
+
     def test_main_prints_progress_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "latest.json"

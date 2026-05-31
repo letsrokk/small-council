@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import sys
+from dataclasses import dataclass
 
 from .codex_runner import (
     CodexRunError,
@@ -77,6 +78,13 @@ from .web_search import (
     search_enabled,
     web_search_config,
 )
+
+
+@dataclass
+class VoteJobFailure:
+    member: object
+    phase: str
+    error: str
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -526,22 +534,15 @@ async def _run_decision(
             )
             for member in members
         ]
-        vote_results = await _run_jobs_with_secretary(
+        votes = await _run_vote_jobs_with_secretary(
             config,
             discussion_jobs,
             secretary,
             renderer,
-            lambda result: _secretary_vote_done(result, secretary, recommendation_groups, 0),
+            recommendation_groups,
+            voting_recommendations,
+            0,
         )
-        votes = [
-            sanitize_vote(
-                canonicalize_vote(
-                    _tag_vote(validate_vote(result.payload, result.member), 0), recommendation_groups
-                ),
-                voting_recommendations,
-            )
-            for result in vote_results
-        ]
         all_votes = votes[:]
         vote_rounds = [evaluate_vote_round(voting_recommendations, votes, 0)]
         secretary.vote_round_done(_round_summary(vote_rounds[-1]))
@@ -572,25 +573,15 @@ async def _run_decision(
                 )
                 for member in members
             ]
-            runoff_results = await _run_jobs_with_secretary(
+            runoff_votes = await _run_vote_jobs_with_secretary(
                 config,
                 runoff_jobs,
                 secretary,
                 renderer,
-                lambda result, round_number=runoff_round: _secretary_vote_done(
-                    result, secretary, recommendation_groups, round_number
-                ),
+                recommendation_groups,
+                current_recommendations,
+                runoff_round,
             )
-            runoff_votes = [
-                sanitize_vote(
-                    canonicalize_vote(
-                        _tag_vote(validate_vote(result.payload, result.member), runoff_round),
-                        recommendation_groups,
-                    ),
-                    current_recommendations,
-                )
-                for result in runoff_results
-            ]
             all_votes.extend(runoff_votes)
             vote_rounds.append(evaluate_vote_round(current_recommendations, runoff_votes, runoff_round))
             secretary.vote_round_done(_round_summary(vote_rounds[-1]))
@@ -855,6 +846,90 @@ async def _run_jobs_with_secretary(
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
+
+
+async def _run_vote_jobs_with_secretary(
+    config: dict,
+    jobs: list[tuple],
+    secretary: BaseSecretary,
+    renderer: BaseRenderer | None,
+    groups: list[dict],
+    recommendations: list[dict],
+    round_number: int,
+) -> list[dict]:
+    tasks = []
+    for member, prompt, schema, phase, web_search in jobs:
+        if renderer:
+            renderer.member_status(member.name, f"running {phase}")
+        task = asyncio.create_task(
+            _run_vote_job(config, member, prompt, schema, phase, web_search, secretary)
+        )
+        tasks.append(task)
+
+    votes: list[dict] = []
+    for task in asyncio.as_completed(tasks):
+        outcome = await task
+        if isinstance(outcome, VoteJobFailure):
+            if renderer:
+                renderer.member_status(outcome.member.name, "failed")
+            secretary.vote_done(outcome.member.name, "abstain", round_number)
+            votes.append(_abstention_vote(outcome.member.name, round_number, outcome.error))
+            continue
+
+        result = outcome
+        if renderer:
+            renderer.member_status(result.member.name, "completed")
+        _secretary_vote_done(result, secretary, groups, round_number)
+        vote = sanitize_vote(
+            canonicalize_vote(
+                _tag_vote(validate_vote(result.payload, result.member), round_number), groups
+            ),
+            recommendations,
+            voter=result.member.name,
+        )
+        votes.append(vote)
+    return votes
+
+
+async def _run_vote_job(
+    config: dict,
+    member,
+    prompt,
+    schema,
+    phase: str,
+    web_search: bool,
+    secretary: BaseSecretary,
+):
+    try:
+        return await asyncio.wait_for(
+            _run_member_with_retries(
+                config, member, prompt, schema, phase, web_search, secretary
+            ),
+            timeout=_vote_timeout_seconds(config),
+        )
+    except Exception as exc:
+        return VoteJobFailure(member=member, phase=phase, error=str(exc) or type(exc).__name__)
+
+
+def _vote_timeout_seconds(config: dict) -> float | None:
+    raw = config.get("council", {}).get("vote_timeout_seconds", 120)
+    timeout = float(raw)
+    return timeout if timeout > 0 else None
+
+
+def _abstention_vote(member_name: str, round_number: int, error: str) -> dict:
+    reason = f"Vote abstained because {member_name}'s vote failed: {error}"
+    return {
+        "voter": member_name,
+        "critique": reason,
+        "selected_option": "",
+        "selected_proposer": "",
+        "reason": reason,
+        "self_vote": False,
+        "round": round_number,
+        "abstained": True,
+        "error": error,
+    }
 
 
 async def _run_member_with_retries(
