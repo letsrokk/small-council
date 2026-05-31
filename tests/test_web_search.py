@@ -10,7 +10,6 @@ import urllib.parse
 from unittest.mock import patch
 
 from small_council.web_search import (
-    DEFAULT_SEARCH_ENGINES,
     OllamaCloudSearchProvider,
     SearchAuthenticationError,
     SearchError,
@@ -35,12 +34,12 @@ def _worker_config(**overrides):
         "provider": "searxng",
         "timeoutSeconds": 1,
         "maxResults": 2,
+        "maxQueriesPerMember": 2,
         "cacheTtlSeconds": 900,
         "minDelaySeconds": 0,
         "maxConcurrentRequests": 10,
         "searxng": {
             "baseUrl": "http://localhost:8080",
-            "defaultEngines": ["bing", "github"],
         },
     }
     config.update(overrides)
@@ -119,6 +118,33 @@ class SearxngSearchTests(unittest.TestCase):
         self.assertEqual(1, captured["timeout"])
         self.assertEqual("searxng", response.provider)
         self.assertEqual("Example", response.results[0].title)
+
+    def test_search_omits_engines_when_not_explicit(self) -> None:
+        provider = SearxngSearchProvider(
+            {"searxng": {"baseUrl": "http://localhost:8080"}, "timeoutSeconds": 1}
+        )
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return None
+
+            def read(self):
+                return b'{"results":[]}'
+
+        captured = {}
+
+        def fake_urlopen(request, timeout):
+            captured["url"] = request.full_url
+            return Response()
+
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            provider.search("latest movies", 5)
+
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(captured["url"]).query)
+        self.assertNotIn("engines", params)
 
     def test_successful_response_parsing(self) -> None:
         payload = {
@@ -221,23 +247,16 @@ class SearchConfigTests(unittest.TestCase):
 
         self.assertTrue(config["enabled"])
         self.assertEqual("searxng", config["provider"])
-        self.assertEqual(15, config["timeoutSeconds"])
-        self.assertEqual(8, config["maxResults"])
+        self.assertEqual(30, config["timeoutSeconds"])
+        self.assertEqual(10, config["maxResults"])
+        self.assertEqual(2, config["maxQueriesPerMember"])
         self.assertEqual(900, config["cacheTtlSeconds"])
         self.assertEqual(3, config["minDelaySeconds"])
-        self.assertEqual(1, config["maxConcurrentRequests"])
+        self.assertEqual(3, config["maxConcurrentRequests"])
         self.assertNotIn("baseUrl", config)
-        self.assertNotIn("defaultEngines", config)
-        self.assertEqual("http://localhost:8080", config["searxng"]["baseUrl"])
-        self.assertEqual(DEFAULT_SEARCH_ENGINES, config["searxng"]["defaultEngines"])
+        self.assertEqual({"baseUrl": "http://localhost:8080"}, config["searxng"])
         self.assertFalse(config["allowFallback"])
         self.assertEqual("searxng", config["fallbackProvider"])
-
-    def test_legacy_web_search_is_ignored(self) -> None:
-        config = web_search_config({"webSearch": {"enabled": False, "maxResults": 3}})
-
-        self.assertTrue(config["enabled"])
-        self.assertEqual(8, config["maxResults"])
 
     def test_nested_provider_config(self) -> None:
         config = web_search_config(
@@ -247,7 +266,6 @@ class SearchConfigTests(unittest.TestCase):
                     "ollama": {"baseUrl": "https://ollama.example", "apiKeyEnv": "TEST_KEY"},
                     "searxng": {
                         "baseUrl": "http://searxng:8080",
-                        "defaultEngines": ["bing", "github"],
                     },
                 }
             }
@@ -257,7 +275,6 @@ class SearchConfigTests(unittest.TestCase):
         self.assertEqual("https://ollama.example", config["ollama"]["baseUrl"])
         self.assertEqual("TEST_KEY", config["ollama"]["apiKeyEnv"])
         self.assertEqual("http://searxng:8080", config["searxng"]["baseUrl"])
-        self.assertEqual(["bing", "github"], config["searxng"]["defaultEngines"])
 
 
 class SearchProviderFactoryTests(unittest.TestCase):
@@ -410,13 +427,13 @@ class OllamaCloudSearchTests(unittest.TestCase):
 
 
 class SearchWorkerTests(unittest.IsolatedAsyncioTestCase):
-    async def test_default_engines_from_config(self) -> None:
+    async def test_default_search_uses_provider_engines(self) -> None:
         provider = FakeProvider()
         worker = SearchWorker(_worker_config(), provider)
 
         await worker.search("python")
 
-        self.assertEqual(["bing", "github"], provider.calls[0][2])
+        self.assertEqual([], provider.calls[0][2])
 
     async def test_per_query_engine_override(self) -> None:
         provider = FakeProvider()
@@ -531,6 +548,30 @@ class SearchWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(response.ok)
         self.assertIn("timed out", response.error or "")
 
+    async def test_hard_timeout_returns_unsuccessful_response(self) -> None:
+        provider = FakeProvider(delay=0.05)
+        events: list[dict] = []
+        worker = SearchWorker(_worker_config(timeoutSeconds=0.01), provider)
+
+        response = await worker.search("python", events=events)
+
+        self.assertFalse(response.ok)
+        self.assertEqual([], response.results)
+        self.assertIn("timed out after 0.01s", response.error or "")
+        self.assertIn("timeout", [event["status"] for event in events])
+
+    async def test_hard_timeout_does_not_poison_in_flight_cache(self) -> None:
+        provider = FakeProvider(delay=0.02)
+        worker = SearchWorker(_worker_config(timeoutSeconds=0.01), provider)
+
+        first = await worker.search("python")
+        await asyncio.sleep(0.05)
+        second = await worker.search("python")
+
+        self.assertFalse(first.ok)
+        self.assertTrue(second.ok)
+        self.assertEqual(1, len(provider.calls))
+
     async def test_malformed_json_handling(self) -> None:
         class ParseProvider(FakeProvider):
             def search(self, query, max_results, engines=None):
@@ -611,7 +652,7 @@ class SearchWorkerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("fallback", response.fallback_provider)
         self.assertEqual(["fallback", "fallback_ok"], [event["status"] for event in events if event["status"].startswith("fallback")])
 
-    async def test_searxng_fallback_uses_searxng_default_engines(self) -> None:
+    async def test_searxng_fallback_uses_provider_engines(self) -> None:
         class FailingProvider(FakeProvider):
             name = "ollama"
 
@@ -628,7 +669,7 @@ class SearchWorkerTests(unittest.IsolatedAsyncioTestCase):
 
         await worker.search("python", events=events)
 
-        self.assertEqual(["bing", "github"], fallback.calls[0][2])
+        self.assertEqual([], fallback.calls[0][2])
 
 
 if __name__ == "__main__":

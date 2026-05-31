@@ -212,6 +212,10 @@ def _reasoning_points(final_output: str, recommendations: list[dict[str, Any]]) 
 def _tradeoff_points(
     case: EvalCase, final_output: str, recommendations: list[dict[str, Any]]
 ) -> int:
+    if case.category == "state_and_system" and not any(
+        focus in case.scoring_focus for focus in ("tradeoffs", "constraint_awareness")
+    ):
+        return 8
     text = final_output.lower()
     points = 0
     if any(word in text for word in ["tradeoff", "pros", "cons", "but", "while", "whereas"]):
@@ -233,6 +237,8 @@ def _diversity_points(
 ) -> int:
     if not recommendations:
         return 0
+    if case.category == "state_and_system" and "diversity" not in case.scoring_focus:
+        return 8 if payload.get("diversity_lanes") else 6
     unique_recs = {_normalize(rec.get("recommendation")) for rec in recommendations if rec.get("recommendation")}
     unique_groups = {
         _normalize(group.get("canonical_option")) for group in groups if group.get("canonical_option")
@@ -364,9 +370,26 @@ def _prompt_options(prompt: str) -> list[str]:
         line = raw.strip().strip(",")
         if not line or len(line) > 80:
             continue
+        inline_match = re.search(
+            r"\b(?:choose|pick)\b.*?:\s*(.+)",
+            line,
+            flags=re.IGNORECASE,
+        )
+        if inline_match:
+            options.extend(_split_inline_options(inline_match.group(1)))
+            continue
         if re.match(r"^[A-Z]$", line) or line[:1].isupper():
             options.append(line)
     return options[-8:]
+
+
+def _split_inline_options(text: str) -> list[str]:
+    cleaned = re.sub(r"\bor\b", ",", text, flags=re.IGNORECASE)
+    return [
+        item.strip(" .,:;!?")
+        for item in cleaned.split(",")
+        if item.strip(" .,:;!?")
+    ]
 
 
 def _option_equivalent(left: str, right: str) -> bool:

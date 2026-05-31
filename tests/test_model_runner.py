@@ -19,12 +19,12 @@ def _config(enabled: bool = True) -> dict:
             "provider": "searxng",
             "timeoutSeconds": 1,
             "maxResults": 2,
+            "maxQueriesPerMember": 2,
             "cacheTtlSeconds": 0,
             "minDelaySeconds": 0,
             "maxConcurrentRequests": 1,
             "searxng": {
                 "baseUrl": "http://localhost:8080",
-                "defaultEngines": ["bing"],
             },
         },
     }
@@ -103,10 +103,43 @@ class ModelRunnerSearchTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(["latest restaurants Budapest"], search_provider.queries)
+        search_plan_prompt = provider.run.await_args_list[0].args[1]
+        self.assertIn("Use 1 to 2 concise search queries", search_plan_prompt)
         final_prompt = provider.run.await_args_list[1].args[1]
         self.assertIn("Web search results", final_prompt)
         self.assertIn("Search snippet", final_prompt)
         self.assertEqual(Path("schema.json"), provider.run.await_args_list[1].args[2])
+
+    async def test_search_plan_truncates_to_configured_query_limit(self) -> None:
+        member = Member("Aurelia", "qwen3:4b", "practical", False, "now", provider="ollama")
+        provider = SimpleNamespace(run=AsyncMock())
+        provider.run.side_effect = [
+            SimpleNamespace(payload={"queries": ["latest one", "latest two", "latest three"]}),
+            SimpleNamespace(payload={"recommendation": "Pick one"}),
+        ]
+        search_provider = FakeSearchProvider()
+
+        with (
+            patch.object(model_runner, "provider_config", return_value={"enabled": True}),
+            patch.object(model_runner, "create_provider", return_value=provider),
+            patch.object(model_runner, "search_enabled", return_value=True),
+            patch.object(
+                model_runner,
+                "create_search_worker",
+                return_value=SearchWorker(_config()["search"], search_provider),
+            ),
+            patch.object(model_runner, "write_search_log"),
+        ):
+            await model_runner.run_member(
+                _config(),
+                member,
+                "The user asks: 'latest restaurants Budapest'",
+                Path("schema.json"),
+                "research",
+                True,
+            )
+
+        self.assertEqual(["latest one", "latest two"], search_provider.queries)
 
     async def test_search_failure_still_runs_final_prompt(self) -> None:
         member = Member("Bram", "qwen3:4b", "skeptical", False, "now", provider="ollama")
@@ -208,10 +241,7 @@ class ModelRunnerSearchTests(unittest.IsolatedAsyncioTestCase):
     async def test_empty_search_plan_does_not_force_search_for_stable_choice(self) -> None:
         member = Member("Aurelia", "qwen3:4b", "practical", False, "now", provider="ollama")
         provider = SimpleNamespace(run=AsyncMock())
-        provider.run.side_effect = [
-            SimpleNamespace(payload={"queries": []}),
-            SimpleNamespace(payload={"recommendation": "Pick one"}),
-        ]
+        provider.run.return_value = SimpleNamespace(payload={"recommendation": "Pick one"})
         search_provider = FakeSearchProvider()
 
         with (
@@ -235,7 +265,8 @@ class ModelRunnerSearchTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual([], search_provider.queries)
-        final_prompt = provider.run.await_args_list[1].args[1]
+        provider.run.assert_awaited_once()
+        final_prompt = provider.run.await_args.args[1]
         self.assertNotIn("Web search results", final_prompt)
 
     async def test_run_many_shares_one_search_worker(self) -> None:

@@ -92,7 +92,20 @@ async def _run_member_with_search(
         return await provider.run(member, prompt, schema_path, phase, False)
 
     events: list[dict[str, Any]] = []
-    queries = await _planned_queries(config, provider, member, prompt, phase, events)
+    question = _question_from_prompt(prompt)
+    if question and not _question_needs_search(question):
+        events.append(
+            {
+                "status": "skipped",
+                "reason": "stable_question",
+                "question": question,
+            }
+        )
+        write_search_log(config, phase, member.name, events)
+        return await provider.run(member, prompt, schema_path, phase, False)
+
+    max_queries = int(search_config["maxQueriesPerMember"])
+    queries = await _planned_queries(config, provider, member, prompt, phase, events, max_queries)
     if not queries:
         write_search_log(config, phase, member.name, events)
         return await provider.run(member, prompt, schema_path, phase, False)
@@ -123,24 +136,25 @@ async def _planned_queries(
     prompt: str,
     phase: str,
     events: list[dict[str, Any]],
+    max_queries: int,
 ) -> list[str]:
     schema_path = ROOT / "schemas" / "search-plan.schema.json"
     try:
         result = await provider.run(
             member,
-            search_plan_prompt(member, prompt),
+            search_plan_prompt(member, prompt, max_queries=max_queries),
             schema_path,
             f"{phase}-search-plan",
             False,
         )
         raw_queries = result.payload.get("queries", [])
-        queries = _normalize_queries(raw_queries)
+        queries = _normalize_queries(raw_queries, max_queries)
         if not queries:
-            queries = _fallback_queries(prompt)
+            queries = _normalize_queries(_fallback_queries(prompt), max_queries)
         events.append({"status": "planned", "queries": queries})
         return queries
     except Exception as exc:
-        fallback = _fallback_queries(prompt)
+        fallback = _normalize_queries(_fallback_queries(prompt), max_queries)
         events.append(
             {
                 "status": "planning_failed",
@@ -151,11 +165,14 @@ async def _planned_queries(
         return fallback
 
 
-def _normalize_queries(raw_queries: Any) -> list[str]:
+def _normalize_queries(raw_queries: Any, max_queries: int = 2) -> list[str]:
     if not isinstance(raw_queries, list):
         return []
     queries: list[str] = []
     seen: set[str] = set()
+    limit = max(0, int(max_queries))
+    if limit == 0:
+        return []
     for raw in raw_queries:
         query = str(raw).strip()
         key = query.lower()
@@ -163,7 +180,7 @@ def _normalize_queries(raw_queries: Any) -> list[str]:
             continue
         seen.add(key)
         queries.append(query)
-        if len(queries) >= 3:
+        if len(queries) >= limit:
             break
     return queries
 

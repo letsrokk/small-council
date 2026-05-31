@@ -1163,10 +1163,25 @@ def _apply_config_sets(config: dict, assignments: list[str]) -> dict:
 
 
 def _validate_set_value(key: str, value) -> None:
-    if key.startswith("webSearch.") or key in {"search.baseUrl", "search.defaultEngines"}:
-        raise ValueError(
-            f"{key} is no longer supported; use provider-specific search settings."
-        )
+    if key.startswith("search.") and key not in {
+        "search.enabled",
+        "search.provider",
+        "search.allowFallback",
+        "search.fallbackProvider",
+        "search.timeoutSeconds",
+        "search.maxResults",
+        "search.maxQueriesPerMember",
+        "search.cacheTtlSeconds",
+        "search.minDelaySeconds",
+        "search.maxConcurrentRequests",
+        "search.ollama.baseUrl",
+        "search.ollama.apiKey",
+        "search.ollama.apiKeyEnv",
+        "search.ollama.searchEndpoint",
+        "search.ollama.fetchEndpoint",
+        "search.searxng.baseUrl",
+    }:
+        raise ValueError(f"{key} is not a supported search setting.")
     if key.endswith(".enabled") or key.endswith(".discover_models") or key.endswith(".allow_unknown_size_models"):
         if not isinstance(value, bool):
             raise ValueError(f"{key} must be true or false.")
@@ -1175,6 +1190,7 @@ def _validate_set_value(key: str, value) -> None:
     if key in {
         "search.timeoutSeconds",
         "search.maxResults",
+        "search.maxQueriesPerMember",
         "search.minDelaySeconds",
         "search.maxConcurrentRequests",
     }:
@@ -1197,8 +1213,6 @@ def _validate_set_value(key: str, value) -> None:
     }:
         if not str(value).strip():
             raise ValueError(f"{key} must not be empty.")
-    if key == "search.searxng.defaultEngines" and not isinstance(value, list):
-        raise ValueError("search.searxng.defaultEngines must be a list.")
     if key.endswith(".max_parameters") and value is not None and parse_parameter_limit(value) is None:
         raise ValueError(f"{key} must be a size like 12b or null.")
     if key == "secretary.provider":

@@ -142,19 +142,14 @@ search:
   provider: searxng
   allowFallback: false
   fallbackProvider: searxng
-  timeoutSeconds: 15
-  maxResults: 8
+  timeoutSeconds: 30
+  maxResults: 10
+  maxQueriesPerMember: 2
   cacheTtlSeconds: 900
   minDelaySeconds: 3
-  maxConcurrentRequests: 1
+  maxConcurrentRequests: 3
   searxng:
     baseUrl: http://localhost:8080
-    defaultEngines:
-      - bing
-      - wikipedia
-      - wikidata
-      - github
-      - stackoverflow
 ```
 
 When running the app inside Docker Compose with a `searxng` service on the same network, use:
@@ -163,24 +158,19 @@ When running the app inside Docker Compose with a `searxng` service on the same 
 search:
   enabled: true
   provider: searxng
-  timeoutSeconds: 15
-  maxResults: 8
+  timeoutSeconds: 30
+  maxResults: 10
+  maxQueriesPerMember: 2
   cacheTtlSeconds: 900
   minDelaySeconds: 3
-  maxConcurrentRequests: 1
+  maxConcurrentRequests: 3
   searxng:
     baseUrl: http://searxng:8080
-    defaultEngines:
-      - bing
-      - wikipedia
-      - wikidata
-      - github
-      - stackoverflow
 ```
 
-SearXNG requests use `/search?q=<query>&format=json` with optional comma-separated `engines`. During research, a member can request searches such as `latest movies streaming this week`, receive compact title/URL/snippet/source results, and use that context in its recommendation. Use `--no-search` to disable web search for a single run.
+SearXNG requests use `/search?q=<query>&format=json` and let SearXNG choose its configured engines. During research, a member can request searches such as `latest movies streaming this week`, receive compact title/URL/snippet/source results, and use that context in its recommendation. Use `--no-search` to disable web search for a single run.
 
-`search.searxng.defaultEngines` is tuned for local agent use: `bing`, `wikipedia`, `wikidata`, `github`, and `stackoverflow`. This avoids the most fragile scraping engines by default and reduces Brave, DuckDuckGo, and Startpage rate-limit issues. Startpage, DuckDuckGo, Google, and Brave scraping engines may still rate-limit or CAPTCHA under agentic workloads if you enable them.
+`search.maxQueriesPerMember` limits how many planned searches a member can run in one phase. `search.timeoutSeconds` is a hard per-query worker cap; if a provider exceeds it, the member receives a compact "search unavailable" message and continues without results for that query.
 
 Ollama Cloud/direct API web search is also supported. It calls Ollama's real web search and fetch APIs; it does not ask a model to invent or summarize search results from memory.
 
@@ -197,8 +187,9 @@ Equivalent YAML:
 search:
   enabled: true
   provider: ollama
-  timeoutSeconds: 15
-  maxResults: 8
+  timeoutSeconds: 30
+  maxResults: 10
+  maxQueriesPerMember: 2
   ollama:
     baseUrl: https://ollama.com
     apiKeyEnv: OLLAMA_API_KEY

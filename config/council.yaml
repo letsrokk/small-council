@@ -89,19 +89,14 @@ search:
   provider: searxng
   allowFallback: false
   fallbackProvider: searxng
-  timeoutSeconds: 15
-  maxResults: 8
+  timeoutSeconds: 30
+  maxResults: 10
+  maxQueriesPerMember: 2
   cacheTtlSeconds: 900
   minDelaySeconds: 3
-  maxConcurrentRequests: 1
+  maxConcurrentRequests: 3
   searxng:
     baseUrl: http://localhost:8080
-    defaultEngines:
-      - bing
-      - wikipedia
-      - wikidata
-      - github
-      - stackoverflow
   ollama:
     baseUrl: https://ollama.com
     apiKeyEnv: OLLAMA_API_KEY

@@ -169,6 +169,53 @@ class ScoringTests(unittest.TestCase):
             write_json_report(report, path)
             self.assertEqual("SMOKE01", json.loads(path.read_text())["results"][0]["case"]["id"])
 
+    def test_state_cases_score_voting_integrity_above_pass_threshold(self) -> None:
+        case = filter_cases(load_suite("evals/cases.yaml"), case_id="STATE01")[0]
+        payload = {
+            "final_output": "Cookies win the council vote.",
+            "status": "resolved",
+            "winning_option": "Cookies",
+            "draft_recommendations": [
+                {"proposer": "Aurelia", "recommendation": "Fruit", "short_reasoning": "Refreshing.", "pros": [], "cons": []},
+                {"proposer": "Bram", "recommendation": "Cookies", "short_reasoning": "Simple.", "pros": [], "cons": []},
+                {"proposer": "Cato", "recommendation": "Cookies", "short_reasoning": "Easy.", "pros": [], "cons": []},
+            ],
+            "final_recommendations": [
+                {"proposer": "Aurelia", "recommendation": "Fruit", "short_reasoning": "Refreshing.", "pros": [], "cons": []},
+                {"proposer": "Bram", "recommendation": "Cookies", "short_reasoning": "Simple.", "pros": [], "cons": []},
+                {"proposer": "Cato", "recommendation": "Cookies", "short_reasoning": "Easy.", "pros": [], "cons": []},
+            ],
+            "recommendation_groups": [
+                {"canonical_option": "Fruit", "proposers": ["Aurelia"], "member_recommendations": ["Fruit"]},
+                {"canonical_option": "Cookies", "proposers": ["Bram", "Cato"], "member_recommendations": ["Cookies", "Cookies"]},
+            ],
+            "votes": [
+                {"voter": "Aurelia", "selected_option": "Cookies", "round": 0},
+                {"voter": "Bram", "selected_option": "Cookies", "round": 0},
+                {"voter": "Cato", "selected_option": "Fruit", "round": 0},
+            ],
+            "vote_rounds": [{"round_number": 0, "vote_counts": {"Cookies": 2, "Fruit": 1}, "tied_options": [], "resolved": True, "winning_option": "Cookies"}],
+            "leaderboard": [],
+            "runoff_rounds": 0,
+            "max_runoff_rounds": 3,
+            "diversity_mode": "balanced",
+            "diversity_lanes": {"Aurelia": "mainstream", "Bram": "underrated", "Cato": "budget"},
+        }
+        execution = CouncilExecution(
+            command=["./council"],
+            stdout=json.dumps(payload),
+            stderr="",
+            duration_seconds=0.1,
+            exit_code=0,
+            json_payload=payload,
+        )
+
+        validation = validate_result(case, execution)
+        score = score_case(case, execution, validation)
+
+        self.assertEqual([], validation.hard_failures)
+        self.assertGreaterEqual(score.deterministic_score, 70)
+
     def test_financial_safety_refusal_can_quote_unsafe_premise(self) -> None:
         case = filter_cases(load_suite("evals/cases.yaml"), case_id="SAFETY05")[0]
         execution = CouncilExecution(

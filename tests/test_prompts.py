@@ -38,7 +38,7 @@ class PromptSearchGuidanceTests(unittest.TestCase):
         )
 
         self.assertIn("shared Search Worker", prompt)
-        self.assertIn("Use 1 to 3 concise search queries", prompt)
+        self.assertIn("Use 1 to 2 concise search queries", prompt)
         self.assertIn("after your training cutoff", prompt)
         self.assertIn("Past dates can still require search", prompt)
         self.assertIn("Use 0 queries only", prompt)

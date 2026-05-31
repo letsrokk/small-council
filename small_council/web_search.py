@@ -15,9 +15,6 @@ from typing import Any, Protocol
 from .config import resolve_project_path
 
 
-DEFAULT_SEARCH_ENGINES = ["bing", "wikipedia", "wikidata", "github", "stackoverflow"]
-
-
 @dataclass(frozen=True)
 class SearchResult:
     title: str
@@ -110,10 +107,6 @@ def web_search_config(config: dict[str, Any]) -> dict[str, Any]:
     searxng = raw.get("searxng") if isinstance(raw.get("searxng"), dict) else {}
     ollama = raw.get("ollama") if isinstance(raw.get("ollama"), dict) else {}
 
-    engines = searxng.get("defaultEngines", DEFAULT_SEARCH_ENGINES)
-    if not isinstance(engines, list):
-        engines = DEFAULT_SEARCH_ENGINES
-    default_engines = [str(engine).strip() for engine in engines if str(engine).strip()]
     searxng_base_url = searxng.get("baseUrl", "http://localhost:8080")
     ollama_base_url = ollama.get("baseUrl", "https://ollama.com")
 
@@ -122,14 +115,14 @@ def web_search_config(config: dict[str, Any]) -> dict[str, Any]:
         "provider": str(raw.get("provider", "searxng")).strip().lower(),
         "allowFallback": bool(raw.get("allowFallback", False)),
         "fallbackProvider": str(raw.get("fallbackProvider", "searxng")).strip().lower(),
-        "timeoutSeconds": float(raw.get("timeoutSeconds", 15)),
-        "maxResults": int(raw.get("maxResults", 8)),
+        "timeoutSeconds": float(raw.get("timeoutSeconds", 30)),
+        "maxResults": int(raw.get("maxResults", 10)),
+        "maxQueriesPerMember": int(raw.get("maxQueriesPerMember", 2)),
         "cacheTtlSeconds": float(raw.get("cacheTtlSeconds", 900)),
         "minDelaySeconds": float(raw.get("minDelaySeconds", 3)),
-        "maxConcurrentRequests": int(raw.get("maxConcurrentRequests", 1)),
+        "maxConcurrentRequests": int(raw.get("maxConcurrentRequests", 3)),
         "searxng": {
             "baseUrl": str(searxng_base_url),
-            "defaultEngines": default_engines or DEFAULT_SEARCH_ENGINES[:],
         },
         "ollama": {
             "baseUrl": str(ollama_base_url),
@@ -187,7 +180,7 @@ class SearxngSearchProvider:
     def __init__(self, config: dict[str, Any]) -> None:
         provider_config = config.get("searxng") if isinstance(config.get("searxng"), dict) else {}
         self.base_url = str(provider_config.get("baseUrl", "http://localhost:8080")).rstrip("/")
-        self.timeout_seconds = float(config.get("timeoutSeconds", 15))
+        self.timeout_seconds = float(config.get("timeoutSeconds", 30))
 
     def search(
         self,
@@ -248,7 +241,7 @@ class OllamaCloudSearchProvider:
         self.api_key = _configured_api_key(provider_config)
         self.search_endpoint = _endpoint_path(provider_config.get("searchEndpoint", "/api/web_search"))
         self.fetch_endpoint = _endpoint_path(provider_config.get("fetchEndpoint", "/api/web_fetch"))
-        self.timeout_seconds = float(config.get("timeoutSeconds", 15))
+        self.timeout_seconds = float(config.get("timeoutSeconds", 30))
 
     def search(
         self,
@@ -365,17 +358,12 @@ class SearchWorker:
         self.provider = provider
         self.fallback_provider = fallback_provider
         self.enabled = bool(config.get("enabled", True))
-        provider_config = config.get("searxng") if isinstance(config.get("searxng"), dict) else {}
-        self.searxng_default_engines = _normalize_engines(provider_config.get("defaultEngines"))
-        self.default_engines = (
-            self.searxng_default_engines
-            if provider.name == "searxng"
-            else []
-        )
-        self.default_max_results = max(0, int(config.get("maxResults", 8)))
+        self.default_engines: list[str] = []
+        self.default_max_results = max(0, int(config.get("maxResults", 10)))
+        self.timeout_seconds = max(0.0, float(config.get("timeoutSeconds", 30)))
         self.cache_ttl_seconds = max(0.0, float(config.get("cacheTtlSeconds", 900)))
         self.min_delay_seconds = max(0.0, float(config.get("minDelaySeconds", 3)))
-        max_concurrent = max(1, int(config.get("maxConcurrentRequests", 1)))
+        max_concurrent = max(1, int(config.get("maxConcurrentRequests", 3)))
         self._semaphore = asyncio.Semaphore(max_concurrent)
         self._cache: dict[tuple[str, tuple[str, ...], int], tuple[float, list[SearchResult]]] = {}
         self._in_flight: dict[tuple[str, tuple[str, ...], int], asyncio.Task[SearchResponse]] = {}
@@ -417,16 +405,36 @@ class SearchWorker:
                     self._run_outbound(query_text, selected_engines, selected_max, events)
                 )
                 self._in_flight[key] = task
+                task.add_done_callback(
+                    lambda completed, task_key=key: asyncio.create_task(
+                        self._forget_in_flight(task_key, completed)
+                    )
+                )
         try:
-            results = await task
-            return results
+            if self.timeout_seconds > 0:
+                return await asyncio.wait_for(asyncio.shield(task), timeout=self.timeout_seconds)
+            return await task
+        except asyncio.TimeoutError:
+            message = f"timed out after {self.timeout_seconds:g}s"
+            _record(events, status="timeout", query=query_text, seconds=self.timeout_seconds)
+            return SearchResponse(
+                query=query_text,
+                results=[],
+                provider=self.provider.name,
+                error=f"search unavailable: {message}",
+            )
         except Exception as exc:
             _record(events, status="failed", query=query_text, error=str(exc), errorType=type(exc).__name__)
             return SearchResponse(query=query_text, results=[], provider=self.provider.name, error=f"search unavailable: {exc}")
-        finally:
-            async with self._lock:
-                if self._in_flight.get(key) is task:
-                    self._in_flight.pop(key, None)
+
+    async def _forget_in_flight(
+        self, key: tuple[str, tuple[str, ...], int], task: asyncio.Task[SearchResponse]
+    ) -> None:
+        if task.done() and not task.cancelled():
+            task.exception()
+        async with self._lock:
+            if self._in_flight.get(key) is task:
+                self._in_flight.pop(key, None)
 
     async def _cached(
         self,
@@ -514,11 +522,6 @@ class SearchWorker:
     ) -> SearchResponse:
         if self.fallback_provider is None:
             raise exc
-        fallback_engines = (
-            self.searxng_default_engines
-            if not engines and self.fallback_provider.name == "searxng"
-            else engines
-        )
         _record(
             events,
             status="fallback",
@@ -526,7 +529,7 @@ class SearchWorker:
             provider=self.provider.name,
             fallbackProvider=self.fallback_provider.name,
         )
-        response = await self._call_provider(self.fallback_provider, query, max_results, fallback_engines)
+        response = await self._call_provider(self.fallback_provider, query, max_results, engines)
         response = SearchResponse(
             query=response.query,
             results=response.results,

@@ -246,6 +246,10 @@ class CliFailureHandlingTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CliMainFailureMessageTests(unittest.TestCase):
+    def test_unknown_search_setting_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "not a supported search setting"):
+            cli._validate_set_value("search.unknownSetting", True)
+
     def test_usage_limit_main_message_is_concise_without_auth_hint(self) -> None:
         members = [_member()]
         stdout = io.StringIO()

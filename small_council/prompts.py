@@ -57,7 +57,8 @@ Known local preferences/history:
 """
 
 
-def search_plan_prompt(member: Member, prompt: str) -> str:
+def search_plan_prompt(member: Member, prompt: str, max_queries: int = 2) -> str:
+    query_limit = max(0, int(max_queries))
     return f"""{BASE_RULES}
 
 Council member:
@@ -68,8 +69,8 @@ Council member:
 You are planning any web searches to run through the shared Search Worker before the member answers.
 Current date: {date.today().isoformat()}
 Return only JSON with a queries array.
-Use 1 to 3 concise search queries when the recommendation needs current, external, or missing facts.
-Use 1 to 3 concise search queries when you lack knowledge, are unsure, or the answer depends on facts after your training cutoff.
+Use 1 to {query_limit} concise search queries when the recommendation needs current, external, or missing facts.
+Use 1 to {query_limit} concise search queries when you lack knowledge, are unsure, or the answer depends on facts after your training cutoff.
 Past dates can still require search when they are recent, post-cutoff, or event-specific.
 Use 0 queries only for stable or common-knowledge decisions where web context would not change the answer.
 
