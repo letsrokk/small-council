@@ -34,6 +34,7 @@ from evals.run_eval import (
     _capture_artifacts,
     _compare_with_previous,
     _create_eval_sandbox,
+    _emit,
     _format_duration,
     _progress_timing,
     execute_case,
@@ -464,6 +465,16 @@ class RunnerTests(unittest.TestCase):
         self.assertEqual("3m 08s", _format_duration(188))
         self.assertEqual("1h 04m 22s", _format_duration(3862))
 
+    def test_emit_prefixes_non_blank_progress_with_local_time(self) -> None:
+        stdout = io.StringIO()
+        with patch("evals.run_eval.datetime") as mocked_datetime:
+            mocked_datetime.now.return_value.strftime.return_value = "[12:34:56]"
+
+            _emit("Small Council evals", stream=stdout)
+            _emit("", stream=stdout)
+
+        self.assertEqual("[12:34:56] Small Council evals\n\n", stdout.getvalue())
+
     def test_progress_timing_reports_elapsed_and_eta(self) -> None:
         with patch("evals.run_eval.time.monotonic", return_value=130.0):
             elapsed, eta = _progress_timing(100.0, completed_runs=0, total_runs=4)
@@ -554,6 +565,11 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(0, exit_code)
             self.assertIn("Small Council evals", rendered)
             self.assertIn("[1/1] SMOKE01 Movie Night (smoke) repeat 1/1", rendered)
+            self.assertRegex(rendered, r"(?m)^\[\d{2}:\d{2}:\d{2}\] Small Council evals$")
+            self.assertRegex(
+                rendered,
+                r"(?m)^\[\d{2}:\d{2}:\d{2}\] \[1/1\] SMOKE01 Movie Night \(smoke\) repeat 1/1",
+            )
             self.assertIn("elapsed=", rendered)
             self.assertIn("eta=", rendered)
             self.assertIn("PASS score=", rendered)

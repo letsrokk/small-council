@@ -1124,6 +1124,8 @@ def _run_id(timestamp: str) -> str:
 
 
 def _emit(message: str, stream: TextIO | None = None) -> None:
+    if message:
+        message = f"{datetime.now().strftime('[%H:%M:%S]')} {message}"
     print(message, file=stream, flush=True)
 
 
