@@ -94,7 +94,7 @@ search:
   maxQueriesPerMember: 2
   cacheTtlSeconds: 900
   minDelaySeconds: 3
-  maxConcurrentRequests: 3
+  maxConcurrentRequests: 2
   searxng:
     baseUrl: http://localhost:8080
   ollama:
